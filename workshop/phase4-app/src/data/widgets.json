@@ -1,0 +1,708 @@
+{
+  "thr-001": {
+    "kind": "diff",
+    "hunks": [
+      {
+        "path": "apps/weather-api/src/auth/password.ts",
+        "title": "Hash passwords with salted scrypt and compare in constant time",
+        "original": "import { createHash } from 'node:crypto';\n\n/** Hash a password for storage. */\nexport function hashPassword(password: string): string {\n  return createHash('sha256').update(password).digest('hex');\n}\n\nexport function verifyPassword(password: string, hash: string): boolean {\n  return hashPassword(password) === hash;\n}",
+        "proposed": "import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';\n\nconst KEY_LENGTH = 64;\n\n/** Hash a password for storage: scrypt with a random per-user salt. */\nexport function hashPassword(password: string): string {\n  const salt = randomBytes(16).toString('hex');\n  const derived = scryptSync(password, salt, KEY_LENGTH).toString('hex');\n  return `scrypt$${salt}$${derived}`;\n}\n\nexport function verifyPassword(password: string, stored: string): boolean {\n  const [, salt, expected] = stored.split('$');\n  if (!salt || !expected) return false;\n  const derived = scryptSync(password, salt, KEY_LENGTH);\n  return timingSafeEqual(derived, Buffer.from(expected, 'hex'));\n}",
+        "explanation": "scrypt is memory-hard and salted per user, so identical passwords no longer share a hash and rainbow tables stop working. timingSafeEqual removes the string-compare timing channel. No new dependency: it ships with Node.",
+        "comment_ids": [
+          "c-01"
+        ]
+      }
+    ]
+  },
+  "thr-002": {
+    "kind": "choice",
+    "question": "Where should tokens live in the browser, and how should refresh tokens behave?",
+    "options": [
+      {
+        "id": "cookie-rotation",
+        "title": "httpOnly refresh cookie + in-memory access token, with rotation",
+        "summary": "Login sets a Secure, httpOnly, SameSite=Strict cookie carrying the refresh token. The access token lives only in memory and expires in 15 minutes. Every refresh issues a new refresh token and revokes the old one.",
+        "pros": [
+          "Refresh token unreachable from JavaScript",
+          "Reuse of an old refresh token detects theft",
+          "Short access TTL bounds the damage of a leak"
+        ],
+        "cons": [
+          "Needs a small store of issued refresh token ids",
+          "CORS must move back to an explicit origin list with credentials",
+          "Requires a CSRF story for the refresh endpoint"
+        ],
+        "effort": "medium",
+        "recommended": true
+      },
+      {
+        "id": "local-rotation",
+        "title": "Keep localStorage, add rotation and a 15-minute access TTL",
+        "summary": "Smallest change to the current code: rotate refresh tokens on every use, cut the access TTL, remove the console.log. Storage stays where it is.",
+        "pros": [
+          "Two small server changes and one client change",
+          "No cookie or CSRF work"
+        ],
+        "cons": [
+          "Refresh token still readable by any script on the origin",
+          "A single XSS still yields a long-lived session"
+        ],
+        "effort": "low",
+        "recommended": false
+      },
+      {
+        "id": "sliding",
+        "title": "Sliding-window refresh token, no rotation",
+        "summary": "Each refresh extends the expiry of the same refresh token. Simplest possible server logic.",
+        "pros": [
+          "No token store needed",
+          "No concurrency issues on the client"
+        ],
+        "cons": [
+          "A stolen refresh token works alongside the real one indefinitely",
+          "No theft detection at all",
+          "Does nothing about localStorage exposure"
+        ],
+        "effort": "low",
+        "recommended": false
+      }
+    ]
+  },
+  "thr-003": {
+    "kind": "diff",
+    "hunks": [
+      {
+        "path": "apps/weather-api/src/routes/favorites.ts",
+        "title": "Scope DELETE to the caller's own favorites",
+        "original": "  router.delete('/:id', (c) => {\n    const removed = removeFavorite(c.req.param('id'));\n    if (!removed) throw notFound('Favorite not found');\n    return c.body(null, 204);\n  });",
+        "proposed": "  router.delete('/:id', (c) => {\n    const removed = removeFavorite(c.get('userId'), c.req.param('id'));\n    if (!removed) throw notFound('Favorite not found');\n    return c.body(null, 204);\n  });",
+        "explanation": "Passing the caller's userId lets the store refuse foreign ids. Returning 404 rather than 403 avoids confirming that the id exists.",
+        "comment_ids": [
+          "c-03"
+        ]
+      },
+      {
+        "path": "apps/weather-api/src/store/favorites.ts",
+        "title": "Check ownership in the store",
+        "original": "export function removeFavorite(id: string): boolean {\n  return favorites.delete(id);\n}",
+        "proposed": "export function removeFavorite(userId: string, id: string): boolean {\n  const favorite = favorites.get(id);\n  if (!favorite || favorite.userId !== userId) return false;\n  return favorites.delete(id);\n}",
+        "explanation": "The store is the last line of defence: even a future route that forgets the check cannot delete across users.",
+        "comment_ids": [
+          "c-03"
+        ]
+      },
+      {
+        "path": "apps/weather-api/src/routes/favorites.ts",
+        "title": "Validate the create body with a strict schema",
+        "original": "  router.post('/', async (c) => {\n    const body = await c.req.json<FavoriteInput>();\n    const favorite = addFavorite(c.get('userId'), body);\n    return c.json({ favorite }, 201);\n  });",
+        "proposed": "  const FavoriteBody = z\n    .object({\n      name: z.string().min(1).max(120),\n      country: z.string().max(120),\n      latitude: z.number().min(-90).max(90),\n      longitude: z.number().min(-180).max(180),\n      timezone: z.string().max(64),\n    })\n    .strict();\n\n  router.post('/', async (c) => {\n    const parsed = FavoriteBody.safeParse(await c.req.json());\n    if (!parsed.success) throw badRequest(parsed.error.issues[0]?.message ?? 'Invalid body');\n    const favorite = addFavorite(c.get('userId'), parsed.data);\n    return c.json({ favorite }, 201);\n  });",
+        "explanation": "Bounds coordinates and string lengths and rejects unknown properties before anything reaches the store or an upstream URL. Needs `import { z } from 'zod'` and `badRequest` from lib/errors.",
+        "comment_ids": [
+          "c-11"
+        ]
+      }
+    ]
+  },
+  "thr-004": {
+    "kind": "diff",
+    "hunks": [
+      {
+        "path": "apps/weather-api/src/config.ts",
+        "title": "Fail at startup when JWT_SECRET is missing",
+        "original": "export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {\n  return {\n    port: Number(env.PORT ?? 8787),\n    forecastCacheTtlMs: Number(env.FORECAST_CACHE_TTL_MS ?? 10 * 60 * 1000),\n    geocodeCacheTtlMs: Number(env.GEOCODE_CACHE_TTL_MS ?? 24 * 60 * 60 * 1000),\n    jwtSecret: env.JWT_SECRET ?? 'dev-secret-change-me',\n    accessTokenTtlSec: Number(env.ACCESS_TOKEN_TTL_SEC ?? 60 * 60 * 24 * 30),\n    refreshTokenTtlSec: Number(env.REFRESH_TOKEN_TTL_SEC ?? 60 * 60 * 24 * 90),\n  };\n}",
+        "proposed": "function requireSecret(env: NodeJS.ProcessEnv, name: string): string {\n  const value = env[name];\n  if (value && value.length >= 32) return value;\n  if (env.NODE_ENV !== 'production' && !value) {\n    console.warn(`[config] ${name} is not set; using an insecure development default`);\n    return 'dev-only-secret-do-not-use-in-production-00';\n  }\n  throw new Error(`${name} must be set and at least 32 characters long`);\n}\n\nexport function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {\n  return {\n    port: Number(env.PORT ?? 8787),\n    forecastCacheTtlMs: Number(env.FORECAST_CACHE_TTL_MS ?? 10 * 60 * 1000),\n    geocodeCacheTtlMs: Number(env.GEOCODE_CACHE_TTL_MS ?? 24 * 60 * 60 * 1000),\n    jwtSecret: requireSecret(env, 'JWT_SECRET'),\n    accessTokenTtlSec: Number(env.ACCESS_TOKEN_TTL_SEC ?? 60 * 60 * 24 * 30),\n    refreshTokenTtlSec: Number(env.REFRESH_TOKEN_TTL_SEC ?? 60 * 60 * 24 * 90),\n  };\n}",
+        "explanation": "Production boots refuse to run with a missing or short secret. Development keeps a default, but only outside production and with a visible warning.",
+        "comment_ids": [
+          "c-04"
+        ]
+      },
+      {
+        "path": "apps/weather-api/src/auth/middleware.ts",
+        "title": "Accept the token from the Authorization header only",
+        "original": "    const header = c.req.header('authorization');\n    let token: string | undefined;\n    if (header && header.indexOf('Bearer ') == 0) {\n      token = header.slice('Bearer '.length);\n    }\n    if (!token) {\n      token = c.req.query('token');\n    }\n    if (!token) {\n      return c.json({ error: 'Unauthorized' }, 401);\n    }",
+        "proposed": "    const header = c.req.header('authorization');\n    const token = header?.startsWith('Bearer ') ? header.slice('Bearer '.length) : undefined;\n    if (!token) {\n      return c.json({ error: 'Unauthorized' }, 401);\n    }",
+        "explanation": "Removes the ?token= path so bearer credentials never appear in URLs, logs, history or Referer headers. Also replaces indexOf == 0 with startsWith.",
+        "comment_ids": [
+          "c-05"
+        ]
+      }
+    ]
+  },
+  "thr-005": {
+    "kind": "graph",
+    "nodes": [
+      {
+        "id": "routes/auth",
+        "label": "routes/auth",
+        "layer": "routes"
+      },
+      {
+        "id": "routes/favorites",
+        "label": "routes/favorites",
+        "layer": "routes"
+      },
+      {
+        "id": "routes/forecast",
+        "label": "routes/forecast",
+        "layer": "routes"
+      },
+      {
+        "id": "store/users",
+        "label": "store/users",
+        "layer": "stores"
+      },
+      {
+        "id": "store/favorites",
+        "label": "store/favorites",
+        "layer": "stores"
+      },
+      {
+        "id": "provider",
+        "label": "OpenMeteoClient",
+        "layer": "providers"
+      },
+      {
+        "id": "lib/cache",
+        "label": "lib/cache (TtlCache)",
+        "layer": "lib"
+      }
+    ],
+    "edges": [
+      {
+        "from": "routes/auth",
+        "to": "store/users",
+        "problem": null,
+        "note": null
+      },
+      {
+        "from": "routes/favorites",
+        "to": "store/favorites",
+        "problem": null,
+        "note": null
+      },
+      {
+        "from": "routes/favorites",
+        "to": "provider",
+        "problem": "bypass",
+        "note": "Calls the provider directly, once per favorite, skipping the TtlCache used by routes/forecast"
+      },
+      {
+        "from": "routes/forecast",
+        "to": "lib/cache",
+        "problem": null,
+        "note": null
+      },
+      {
+        "from": "routes/forecast",
+        "to": "provider",
+        "problem": null,
+        "note": null
+      },
+      {
+        "from": "store/users",
+        "to": "store/favorites",
+        "problem": "cycle",
+        "note": "deleteUser cascades via removeFavoritesForUser"
+      },
+      {
+        "from": "store/favorites",
+        "to": "store/users",
+        "problem": "cycle",
+        "note": "addFavorite checks findById"
+      }
+    ],
+    "proposed": {
+      "nodes": [
+        {
+          "id": "routes/auth",
+          "label": "routes/auth",
+          "layer": "routes"
+        },
+        {
+          "id": "routes/favorites",
+          "label": "routes/favorites",
+          "layer": "routes"
+        },
+        {
+          "id": "routes/forecast",
+          "label": "routes/forecast",
+          "layer": "routes"
+        },
+        {
+          "id": "services/accounts",
+          "label": "services/accounts",
+          "layer": "services"
+        },
+        {
+          "id": "services/favorites",
+          "label": "services/favorites",
+          "layer": "services"
+        },
+        {
+          "id": "services/forecast",
+          "label": "services/forecast",
+          "layer": "services"
+        },
+        {
+          "id": "store/users",
+          "label": "store/users",
+          "layer": "stores"
+        },
+        {
+          "id": "store/favorites",
+          "label": "store/favorites",
+          "layer": "stores"
+        },
+        {
+          "id": "provider",
+          "label": "OpenMeteoClient",
+          "layer": "providers"
+        },
+        {
+          "id": "lib/cache",
+          "label": "lib/cache (TtlCache)",
+          "layer": "lib"
+        }
+      ],
+      "edges": [
+        {
+          "from": "routes/auth",
+          "to": "services/accounts"
+        },
+        {
+          "from": "routes/favorites",
+          "to": "services/favorites"
+        },
+        {
+          "from": "routes/forecast",
+          "to": "services/forecast"
+        },
+        {
+          "from": "services/accounts",
+          "to": "store/users"
+        },
+        {
+          "from": "services/accounts",
+          "to": "store/favorites"
+        },
+        {
+          "from": "services/favorites",
+          "to": "store/favorites"
+        },
+        {
+          "from": "services/favorites",
+          "to": "services/forecast"
+        },
+        {
+          "from": "services/forecast",
+          "to": "lib/cache"
+        },
+        {
+          "from": "services/forecast",
+          "to": "provider"
+        }
+      ]
+    },
+    "explanation": "Today the two stores depend on each other and a route reaches past the cache into the provider. With a service layer, the cascade delete lives in services/accounts, favorites enrichment goes through the same cached forecast lookup the forecast route uses, and every edge points in one direction: routes to services to stores and providers."
+  },
+  "thr-006": {
+    "kind": "custom",
+    "tree": {
+      "type": "stack",
+      "direction": "column",
+      "children": [
+        {
+          "type": "callout",
+          "tone": "danger",
+          "title": "Ordering hazard",
+          "text": "The new web build sends an Authorization header on every request. The API currently in production does not allow that header in CORS preflight. If the web app ships first, every forecast and geocode call fails and the app goes blank for signed-in users."
+        },
+        {
+          "type": "timeline",
+          "steps": [
+            {
+              "title": "Provision JWT_SECRET in dev, staging and prod",
+              "description": "At least 32 random bytes per environment. Without it the API silently signs tokens with the default committed to the repo.",
+              "status": "pending",
+              "owner": "platform"
+            },
+            {
+              "title": "Make the API refuse to boot without the secret",
+              "description": "Turn the fallback into a startup error so a missing value fails the deploy instead of shipping the dev secret.",
+              "status": "pending",
+              "owner": "api"
+            },
+            {
+              "title": "Deploy the API",
+              "description": "CORS allows Authorization from the explicit web origin, auth and favorites routes are live, nothing calls them yet.",
+              "status": "pending",
+              "owner": "api"
+            },
+            {
+              "title": "Deploy the web app with the accounts UI behind a flag, off",
+              "description": "The bundle ships dark. Existing users see no change and no Authorization header is sent until the flag is on.",
+              "status": "pending",
+              "owner": "web"
+            },
+            {
+              "title": "Flip the flag and watch 401 and CORS error rates",
+              "description": "One switch to roll back if the auth flow misbehaves, no redeploy needed.",
+              "status": "pending",
+              "owner": "web"
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "columns": [
+            "If this ships first",
+            "What breaks"
+          ],
+          "rows": [
+            [
+              "Web before API",
+              "CORS preflight rejects Authorization; all data requests fail"
+            ],
+            [
+              "API before secret",
+              "Tokens signed with the public default; anyone can mint one"
+            ],
+            [
+              "Flag on before API",
+              "Login form posts to routes that return 404"
+            ]
+          ]
+        },
+        {
+          "type": "stack",
+          "direction": "row",
+          "gap": "sm",
+          "children": [
+            {
+              "type": "badge",
+              "text": "4 comments",
+              "tone": "neutral"
+            },
+            {
+              "type": "badge",
+              "text": "3 files",
+              "tone": "neutral"
+            },
+            {
+              "type": "badge",
+              "text": "also reverts CORS wildcard",
+              "tone": "warning"
+            },
+            {
+              "type": "button",
+              "label": "Sequence agreed",
+              "action": {
+                "type": "resolve"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "thr-007": {
+    "kind": "diff",
+    "hunks": [
+      {
+        "path": "apps/weather-web/src/api/client.ts",
+        "title": "Retry once after refresh and make refresh single-flight",
+        "original": "}\n\nasync function request<T>(path: string, init?: RequestInit): Promise<T> {\n  const token = tokenProvider?.getAccessToken();\n  const res = await fetch(path, {\n    ...init,\n    headers: {\n      'Content-Type': 'application/json',\n      ...(token ? { Authorization: `Bearer ${token}` } : {}),\n      ...(init?.headers ?? {}),\n    },\n  });\n  if (res.status === 401 && tokenProvider) {\n    const fresh = await tokenProvider.refresh();\n    if (fresh) {\n      return request<T>(path, init);\n    }\n  }\n  if (!res.ok) {\n    const body = (await res.json().catch(() => ({}))) as any;\n    throw new ApiError(res.status, body.error ?? res.statusText);\n  }\n  if (res.status === 204) return undefined as T;",
+        "proposed": "let refreshing: Promise<string | null> | null = null;\n\nfunction refreshOnce(): Promise<string | null> {\n  if (!tokenProvider) return Promise.resolve(null);\n  refreshing ??= tokenProvider.refresh().finally(() => {\n    refreshing = null;\n  });\n  return refreshing;\n}\n\nasync function request<T>(path: string, init?: RequestInit, retried = false): Promise<T> {\n  const token = tokenProvider?.getAccessToken();\n  const res = await fetch(path, {\n    ...init,\n    headers: {\n      'Content-Type': 'application/json',\n      ...(token ? { Authorization: `Bearer ${token}` } : {}),\n      ...(init?.headers ?? {}),\n    },\n  });\n  if (res.status === 401 && tokenProvider && !retried) {\n    const fresh = await refreshOnce();\n    if (fresh) {\n      return request<T>(path, init, true);\n    }\n  }\n  if (!res.ok) {\n    const body = (await res.json().catch(() => ({}))) as { error?: string };\n    throw new ApiError(res.status, body.error ?? res.statusText);\n  }\n  if (res.status === 204) return undefined as T;\n  return (await res.json()) as T;\n}",
+        "explanation": "The retried flag bounds the recursion to one retry. refreshOnce shares a single in-flight promise so concurrent 401s wait for the same refresh instead of racing and overwriting each other.",
+        "comment_ids": [
+          "c-19",
+          "c-17"
+        ]
+      },
+      {
+        "path": "apps/weather-web/src/auth/AuthContext.tsx",
+        "title": "Decode the JWT payload as base64url and survive bad tokens",
+        "original": "function decodeUser(accessToken: string): AuthUser {\n  const payload = JSON.parse(atob(accessToken.split('.')[1]!)) as { sub: string };\n  return { id: payload.sub };\n}",
+        "proposed": "function decodeUser(accessToken: string): AuthUser | null {\n  try {\n    const segment = accessToken.split('.')[1] ?? '';\n    const base64 = segment.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(segment.length / 4) * 4, '=');\n    const payload = JSON.parse(atob(base64)) as { sub?: string };\n    return payload.sub ? { id: payload.sub } : null;\n  } catch {\n    return null;\n  }\n}",
+        "explanation": "JWT segments are base64url. Converting to standard base64 with padding makes atob safe, and the try/catch turns a stale or malformed token into a signed-out state instead of a crash on mount.",
+        "comment_ids": [
+          "c-20"
+        ]
+      }
+    ]
+  },
+  "thr-008": {
+    "kind": "file",
+    "path": "apps/weather-api/src/routes/auth.ts",
+    "annotations": [
+      {
+        "line": 17,
+        "comment_id": "c-12",
+        "author": "sentinel-bot",
+        "severity": "low",
+        "text": "Emails are stored and compared exactly as typed, so Ada@Example.com and ada@example.com become two accounts. Normalise with trim().toLowerCase() on register and login."
+      },
+      {
+        "line": 30,
+        "comment_id": "c-09",
+        "author": "sentinel-bot",
+        "severity": "medium",
+        "text": "No rate limiting, lockout or delay on login. With the fast hash this makes credential stuffing cheap. Add a per-IP and per-email limiter and return 429 with Retry-After."
+      },
+      {
+        "line": 35,
+        "comment_id": "c-06",
+        "author": "sentinel-bot",
+        "severity": "low",
+        "text": "Distinct messages for unknown email and wrong password reveal which emails are registered. Return one generic 401 for both branches."
+      }
+    ]
+  },
+  "thr-009": {
+    "kind": "choice",
+    "question": "How should the favorites panel stay in sync across devices?",
+    "options": [
+      {
+        "id": "focus",
+        "title": "Refetch on focus and visibility, plus after local mutations",
+        "summary": "Reload the list when the tab regains focus or becomes visible, and after every add or remove. No timer at all.",
+        "pros": [
+          "Covers the \"added it on my phone\" case the moment the user returns",
+          "Zero background traffic",
+          "A few lines in the existing hook"
+        ],
+        "cons": [
+          "Changes made while the tab is already focused on another device appear only on the next focus"
+        ],
+        "effort": "low",
+        "recommended": true
+      },
+      {
+        "id": "backoff",
+        "title": "Poll with backoff, paused while hidden",
+        "summary": "Keep the interval but start at 60 seconds, pause when document.hidden, and reset on user activity.",
+        "pros": [
+          "Minimal conceptual change from today",
+          "Eventually consistent without user action"
+        ],
+        "cons": [
+          "Still multiplies provider calls server-side",
+          "Timer and visibility bookkeeping to maintain"
+        ],
+        "effort": "low",
+        "recommended": false
+      },
+      {
+        "id": "sse",
+        "title": "Server push over Server-Sent Events",
+        "summary": "The favorites route exposes an event stream and pushes changes to every connected client for that user.",
+        "pros": [
+          "Real-time across devices",
+          "No client polling"
+        ],
+        "cons": [
+          "New long-lived connection to run and scale",
+          "Auth for the stream needs its own design",
+          "Heavy for a list that changes a few times a day"
+        ],
+        "effort": "high",
+        "recommended": false
+      }
+    ]
+  },
+  "thr-010": {
+    "kind": "chart",
+    "title": "Line coverage of code touched by this PR",
+    "unit": "%",
+    "threshold": 80,
+    "series": [
+      {
+        "label": "routes/auth.ts",
+        "before": null,
+        "after": 38
+      },
+      {
+        "label": "auth/jwt.ts",
+        "before": null,
+        "after": 45
+      },
+      {
+        "label": "routes/favorites.ts",
+        "before": null,
+        "after": 0
+      },
+      {
+        "label": "store/favorites.ts",
+        "before": null,
+        "after": 0
+      },
+      {
+        "label": "auth/middleware.ts",
+        "before": null,
+        "after": 0
+      },
+      {
+        "label": "web/auth/AuthContext.tsx",
+        "before": null,
+        "after": 0
+      },
+      {
+        "label": "web/favorites/useFavorites.ts",
+        "before": null,
+        "after": 0
+      },
+      {
+        "label": "web/api/client.ts",
+        "before": 72,
+        "after": 31
+      }
+    ],
+    "headline": {
+      "label": "PR-wide line coverage",
+      "before": 81,
+      "after": 64
+    },
+    "note": "The one new test exercises register and login only. Every 0% row is a file with no test at all, and the untested branches include the security-relevant ones flagged in other threads. The repo has no web test setup yet, so the web rows need a harness before they can move."
+  },
+  "thr-011": {
+    "kind": "checklist",
+    "items": [
+      {
+        "id": "n01",
+        "comment_id": "c-28",
+        "path": "packages/weather-core/src/types.ts",
+        "line": 47,
+        "text": "Replace Record<string, any> with unknown or a UserPreferences interface",
+        "autofix": false
+      },
+      {
+        "id": "n02",
+        "comment_id": "c-29",
+        "path": "apps/weather-api/src/config.ts",
+        "line": 16,
+        "text": "Name the TTL constants instead of 60 * 60 * 24 * 30",
+        "autofix": false
+      },
+      {
+        "id": "n03",
+        "comment_id": "c-30",
+        "path": "apps/weather-api/src/auth/jwt.ts",
+        "line": 1,
+        "text": "Remove the unused decodeJwt import",
+        "autofix": true
+      },
+      {
+        "id": "n04",
+        "comment_id": "c-31",
+        "path": "apps/weather-api/src/auth/middleware.ts",
+        "line": 18,
+        "text": "Use startsWith and strict equality instead of indexOf == 0",
+        "autofix": true
+      },
+      {
+        "id": "n05",
+        "comment_id": "c-32",
+        "path": "apps/weather-api/src/store/users.ts",
+        "line": 22,
+        "text": "Rename fetchUserByEmail to findByEmail to match findById",
+        "autofix": true
+      },
+      {
+        "id": "n06",
+        "comment_id": "c-33",
+        "path": "apps/weather-api/src/routes/auth.ts",
+        "line": 32,
+        "text": "Remove the login attempt console.log",
+        "autofix": true
+      },
+      {
+        "id": "n07",
+        "comment_id": "c-34",
+        "path": "apps/weather-api/src/routes/auth.ts",
+        "line": 65,
+        "text": "Wrap the /me response as { user } like the other auth routes",
+        "autofix": false
+      },
+      {
+        "id": "n08",
+        "comment_id": "c-35",
+        "path": "apps/weather-api/src/routes/favorites.ts",
+        "line": 17,
+        "text": "Replace the sequential await loop with Promise.all",
+        "autofix": false
+      },
+      {
+        "id": "n09",
+        "comment_id": "c-36",
+        "path": "apps/weather-api/src/routes/favorites.ts",
+        "line": 15,
+        "text": "Remove the TODO or link it to a tracked issue",
+        "autofix": false
+      },
+      {
+        "id": "n10",
+        "comment_id": "c-37",
+        "path": "apps/weather-api/src/app.ts",
+        "line": 35,
+        "text": "Remove the routes mounted console.log",
+        "autofix": true
+      },
+      {
+        "id": "n11",
+        "comment_id": "c-38",
+        "path": "apps/weather-web/src/auth/AuthContext.tsx",
+        "line": 22,
+        "text": "Use STORAGE_KEY instead of the repeated literal",
+        "autofix": true
+      },
+      {
+        "id": "n12",
+        "comment_id": "c-39",
+        "path": "apps/weather-web/src/auth/LoginForm.tsx",
+        "line": 28,
+        "text": "Move the inline style objects into the auth-form CSS rules",
+        "autofix": false
+      },
+      {
+        "id": "n13",
+        "comment_id": "c-40",
+        "path": "apps/weather-web/src/auth/LoginForm.tsx",
+        "line": 32,
+        "text": "Add visually hidden labels to the email and password inputs",
+        "autofix": false
+      },
+      {
+        "id": "n14",
+        "comment_id": "c-41",
+        "path": "apps/weather-web/src/styles.css",
+        "line": 252,
+        "text": "Replace the hardcoded #38bdf8 with var(--accent)",
+        "autofix": true
+      },
+      {
+        "id": "n15",
+        "comment_id": "c-42",
+        "path": "apps/weather-web/src/favorites/FavoritesPanel.tsx",
+        "line": 17,
+        "text": "Key favorites by favorite.id instead of the array index",
+        "autofix": false
+      },
+      {
+        "id": "n16",
+        "comment_id": "c-43",
+        "path": "apps/weather-web/src/favorites/FavoritesPanel.tsx",
+        "line": 36,
+        "text": "Replace the nested ternary with formatTemp from lib/format",
+        "autofix": false
+      },
+      {
+        "id": "n17",
+        "comment_id": "c-44",
+        "path": "apps/weather-web/src/styles.css",
+        "line": 212,
+        "text": "Change the original .app max-width instead of overriding with !important",
+        "autofix": false
+      }
+    ]
+  }
+}

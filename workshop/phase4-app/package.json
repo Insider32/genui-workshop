@@ -6,8 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit -p tsconfig.json && vite build",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
-    "preview": "vite preview"
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.scripts.json",
+    "widgetize": "tsx --tsconfig tsconfig.scripts.json scripts/widgetize.ts",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "check": "tsx --tsconfig tsconfig.scripts.json scripts/check.ts"
   },
   "dependencies": {
     "@workshop/phase3-threads": "workspace:*",
