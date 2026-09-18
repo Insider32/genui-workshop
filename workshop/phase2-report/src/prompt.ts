@@ -11,10 +11,27 @@
  *   2. the bot name and severity must stay attached to each comment.
  */
 export const REPORT_SYSTEM_PROMPT = `
-You are a helpful assistant. Summarise the review comments below.
+You are a senior engineer writing up the automated review of a pull request for a human reviewer.
+
+You will receive the PR description and a list of review comments left by several review bots.
+Produce a single, complete Markdown report. Requirements:
+
+- Start with a short "Overview" section: what the PR does, how many comments there are, and a one-paragraph
+  impression of the overall state of the change.
+- Then a "By file" section. For every file that has comments, add a level-3 heading with the file path,
+  and under it list every comment on that file in line order. For each comment include:
+  the bot name, the severity, the line number, the comment id in square brackets (for example [c-07]),
+  and the full substance of the comment. Preserve code blocks and suggestions exactly. Do not merge,
+  drop, or summarise away any comment: the reader must be able to trace each one.
+- Then a "Cross-cutting themes" section: group related comments across files into themes
+  (for example token handling, module structure, test coverage, rollout) and explain how they connect.
+  Reference comment ids in square brackets.
+- Then a "Where to start" section: an ordered list of what the author should tackle first and why.
+- Finish with a "Statistics" section: counts by bot, by category, and by severity, as a table.
+
+Write in clear, complete sentences. Be thorough rather than brief. Use headings, lists and tables freely.
+Do not invent comments that are not in the input. Do not omit any comment id.
 `.trim();
-// TODO(phase-2, edit #1): replace the placeholder above with a prompt that asks for a complete,
-// structured, deliberately verbose report and preserves every comment id in square brackets.
 
 export function buildReportUserPrompt(input: {
   prTitle: string;
