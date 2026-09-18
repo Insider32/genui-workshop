@@ -1,0 +1,442 @@
+[
+  {
+    "id": "c-01",
+    "author": "sentinel-bot",
+    "category": "security",
+    "severity": "critical",
+    "path": "apps/weather-api/src/auth/password.ts",
+    "line": 5,
+    "side": "RIGHT",
+    "body": "Passwords are hashed with a single unsalted SHA-256. That is not a password hash: it is fast, deterministic, and trivially reversible with a rainbow table for any common password. Two users with the same password also get identical hashes, which leaks that fact from the store.\n\nUse a memory-hard KDF with a per-user random salt. Node ships `scrypt` so there is no new dependency:\n\n```ts\nimport { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';\n\nconst KEY_LENGTH = 64;\n\nexport function hashPassword(password: string): string {\n  const salt = randomBytes(16).toString('hex');\n  const derived = scryptSync(password, salt, KEY_LENGTH).toString('hex');\n  return `scrypt$${salt}$${derived}`;\n}\n\nexport function verifyPassword(password: string, stored: string): boolean {\n  const [, salt, expected] = stored.split('$');\n  if (!salt || !expected) return false;\n  const derived = scryptSync(password, salt, KEY_LENGTH);\n  return timingSafeEqual(derived, Buffer.from(expected, 'hex'));\n}\n```\n\nThe `timingSafeEqual` also removes the string-compare timing channel in `verifyPassword`. Blocking."
+  },
+  {
+    "id": "c-02",
+    "author": "sentinel-bot",
+    "category": "security",
+    "severity": "high",
+    "path": "apps/weather-web/src/auth/AuthContext.tsx",
+    "line": 28,
+    "side": "RIGHT",
+    "body": "Both the access token and the refresh token are written to `localStorage`. Anything that achieves script execution on this origin (a compromised dependency, an XSS in the search results rendering) can read them and has a 90-day session.\n\nOptions, roughly in order of preference:\n1. Move the refresh token to an `httpOnly; Secure; SameSite=Strict` cookie set by `/api/auth/login`, keep a short-lived access token in memory only.\n2. Keep tokens in memory and rely on the refresh endpoint plus a cookie for silent re-auth on reload.\n3. Keep `localStorage` but ship a strict CSP and shorten the access TTL drastically.\n\nThis interacts with the refresh-token rotation question raised on `routes/auth.ts`, so worth deciding together."
+  },
+  {
+    "id": "c-03",
+    "author": "sentinel-bot",
+    "category": "security",
+    "severity": "high",
+    "path": "apps/weather-api/src/routes/favorites.ts",
+    "line": 41,
+    "side": "RIGHT",
+    "body": "`DELETE /api/favorites/:id` deletes whatever id is passed. There is no check that the favorite belongs to `c.get('userId')`. Any authenticated user can delete any other user's favorites by guessing or enumerating ids (IDOR).\n\nScope the lookup to the caller:\n\n```ts\nrouter.delete('/:id', (c) => {\n  const removed = removeFavorite(c.get('userId'), c.req.param('id'));\n  if (!removed) throw notFound('Favorite not found');\n  return c.body(null, 204);\n});\n```\n\nand in `store/favorites.ts`:\n\n```ts\nexport function removeFavorite(userId: string, id: string): boolean {\n  const favorite = favorites.get(id);\n  if (!favorite || favorite.userId !== userId) return false;\n  return favorites.delete(id);\n}\n```\n\nReturning 404 rather than 403 for someone else's id avoids confirming that the id exists."
+  },
+  {
+    "id": "c-04",
+    "author": "sentinel-bot",
+    "category": "security",
+    "severity": "high",
+    "path": "apps/weather-api/src/config.ts",
+    "line": 15,
+    "side": "RIGHT",
+    "body": "`JWT_SECRET` falls back to a hardcoded string. If the env var is missing in staging or production, the API boots normally and signs every token with a secret that is in the public repo. Anyone can then mint valid access tokens for any user id.\n\nFail loudly instead:\n\n```suggestion\n    jwtSecret: requireSecret(env, 'JWT_SECRET'),\n```\n\nwith a helper that throws at startup when the value is missing or shorter than 32 bytes. A dev-only default is fine if it is gated on `NODE_ENV !== 'production'` and logged as a warning."
+  },
+  {
+    "id": "c-05",
+    "author": "sentinel-bot",
+    "category": "security",
+    "severity": "medium",
+    "path": "apps/weather-api/src/auth/middleware.ts",
+    "line": 22,
+    "side": "RIGHT",
+    "body": "Accepting the access token from `?token=` puts bearer credentials into request URLs. URLs end up in access logs, proxy logs, browser history and `Referer` headers. The doc comment says it is \"for simple links and debugging\", which is exactly how these end up in production.\n\nRemove the query-string path and accept `Authorization: Bearer` only. If a link-based flow is genuinely needed later, it should use a separate short-lived, single-purpose token."
+  },
+  {
+    "id": "c-06",
+    "author": "sentinel-bot",
+    "category": "security",
+    "severity": "low",
+    "path": "apps/weather-api/src/routes/auth.ts",
+    "line": 35,
+    "side": "RIGHT",
+    "body": "Login returns `No account exists for this email` versus `Incorrect password`. That tells an attacker which emails are registered (user enumeration). Return the same generic 401 for both branches, e.g. `Invalid email or password`, and keep the distinction in server-side logs only if you need it."
+  },
+  {
+    "id": "c-07",
+    "author": "sentinel-bot",
+    "category": "security",
+    "severity": "medium",
+    "path": "apps/weather-api/src/config.ts",
+    "line": 16,
+    "side": "RIGHT",
+    "body": "The access token lives for 30 days. Access tokens are bearer credentials with no revocation path in this design, so a leaked one is valid for a month. With a refresh flow already in place there is no reason for the access TTL to exceed 15 minutes or so. Let the refresh token carry the long session."
+  },
+  {
+    "id": "c-08",
+    "author": "sentinel-bot",
+    "category": "security",
+    "severity": "medium",
+    "path": "apps/weather-web/src/auth/LoginForm.tsx",
+    "line": 19,
+    "side": "RIGHT",
+    "body": "`console.log('auth response', tokens)` prints the access and refresh tokens to the browser console on every sign-in. Consoles are captured by error-reporting tools and session-replay SDKs, and are visible to anyone with the device. Please remove before merge."
+  },
+  {
+    "id": "c-09",
+    "author": "sentinel-bot",
+    "category": "security",
+    "severity": "medium",
+    "path": "apps/weather-api/src/routes/auth.ts",
+    "line": 30,
+    "side": "RIGHT",
+    "body": "`/api/auth/login` has no rate limiting, lockout, or delay. Combined with the fast unsalted hash on `password.ts` this makes online credential stuffing cheap. At minimum add a per-IP and per-email limiter (a small token bucket in the existing `TtlCache` would do for now) and return 429 with `Retry-After`."
+  },
+  {
+    "id": "c-10",
+    "author": "sentinel-bot",
+    "category": "security",
+    "severity": "medium",
+    "path": "apps/weather-api/src/app.ts",
+    "line": 24,
+    "side": "RIGHT",
+    "body": "`origin: '*'` together with `credentials: true` is an invalid combination: browsers reject credentialed responses with a wildcard origin, so this either silently does nothing or will break the moment cookies are introduced (see the token storage discussion). The previous explicit allow-list was correct. Keep the list and add the production web origin from config."
+  },
+  {
+    "id": "c-11",
+    "author": "sentinel-bot",
+    "category": "security",
+    "severity": "medium",
+    "path": "apps/weather-api/src/routes/favorites.ts",
+    "line": 35,
+    "side": "RIGHT",
+    "body": "The request body is cast to `FavoriteInput` and stored as-is. Nothing checks that `latitude` is in [-90, 90], that `longitude` is in [-180, 180], that `name` is a string of sane length, or that no extra properties come along for the ride. A client can store a 2 MB `name` or a `timezone` string that later gets interpolated into an upstream URL.\n\nValidate at the edge, for example with zod:\n\n```ts\nconst FavoriteBody = z.object({\n  name: z.string().min(1).max(120),\n  country: z.string().max(120),\n  latitude: z.number().min(-90).max(90),\n  longitude: z.number().min(-180).max(180),\n  timezone: z.string().max(64),\n}).strict();\n\nrouter.post('/', async (c) => {\n  const parsed = FavoriteBody.safeParse(await c.req.json());\n  if (!parsed.success) throw badRequest(parsed.error.issues[0]?.message ?? 'Invalid body');\n  const favorite = addFavorite(c.get('userId'), parsed.data);\n  return c.json({ favorite }, 201);\n});\n```"
+  },
+  {
+    "id": "c-12",
+    "author": "sentinel-bot",
+    "category": "security",
+    "severity": "low",
+    "path": "apps/weather-api/src/routes/auth.ts",
+    "line": 17,
+    "side": "RIGHT",
+    "body": "Emails are stored and compared exactly as typed. `Ada@Example.com` and `ada@example.com` become two accounts, and a trailing space produces a third. Normalise with `trim().toLowerCase()` on both register and login before lookup."
+  },
+  {
+    "id": "c-13",
+    "author": "archwise-bot",
+    "category": "architecture",
+    "severity": "high",
+    "path": "apps/weather-api/src/store/users.ts",
+    "line": 3,
+    "side": "RIGHT",
+    "body": "This introduces a circular import: `store/users.ts` imports `removeFavoritesForUser` from `store/favorites.ts`, and `store/favorites.ts` imports `findById` from `store/users.ts`. It works today only because both are used inside function bodies rather than at module evaluation time. The first time someone adds a top-level constant that touches the other module, one side will see `undefined`.\n\nThe cascade delete is an application concern, not a store concern. Move it up: a `deleteAccount(userId)` in a service module can call both stores, and neither store needs to know the other exists."
+  },
+  {
+    "id": "c-14",
+    "author": "archwise-bot",
+    "category": "architecture",
+    "severity": "medium",
+    "path": "apps/weather-api/src/routes/favorites.ts",
+    "line": 18,
+    "side": "RIGHT",
+    "body": "The favorites route calls `OpenMeteoClient.forecast()` directly, once per favorite, sequentially. Three things fall out of that:\n\n- It bypasses the `TtlCache` that `routes/forecast.ts` already wraps around the same call, so every panel refresh hits the upstream API even when the forecast route has a fresh copy.\n- It is an N+1 against a third-party API with its own rate limits. Ten favorites polled every 5 seconds is 120 upstream calls a minute per user.\n- The route layer now depends on the provider client, which was previously only known to the forecast route.\n\nExtract the cached forecast lookup into a shared service that both routes use, and let the panel fetch temperatures lazily or in one batched call."
+  },
+  {
+    "id": "c-15",
+    "author": "archwise-bot",
+    "category": "architecture",
+    "severity": "medium",
+    "path": "apps/weather-api/src/app.ts",
+    "line": 34,
+    "side": "RIGHT",
+    "body": "Between this, the circular store import, and the ownership check that is missing on delete, the favorites feature wants a service layer: `services/favorites.ts` owning \"list for user with weather\", \"add for user\", \"remove for user\", with the stores reduced to dumb maps and the routes reduced to HTTP translation. The dependency graph would then be routes → services → stores/providers with no back edges. Happy to sketch it if useful."
+  },
+  {
+    "id": "c-16",
+    "author": "archwise-bot",
+    "category": "architecture",
+    "severity": "medium",
+    "path": "apps/weather-web/src/favorites/useFavorites.ts",
+    "line": 22,
+    "side": "RIGHT",
+    "body": "The panel polls `GET /api/favorites` every 5 seconds for as long as the user is signed in, whether or not the tab is visible. Given each call fans out to the weather provider server-side, this is the most expensive loop in the app.\n\nAlternatives, cheapest first:\n- Refetch on `visibilitychange` and `focus`, plus after local mutations. Covers the \"I added it on my phone\" case the moment they come back to the tab.\n- Poll, but back off to 60 s and pause while `document.hidden`.\n- Server push (SSE) from the favorites route. Real-time, but a new moving part for a list that changes a few times a day.\n\nThe first option is probably enough for this feature."
+  },
+  {
+    "id": "c-17",
+    "author": "archwise-bot",
+    "category": "architecture",
+    "severity": "medium",
+    "path": "apps/weather-web/src/api/client.ts",
+    "line": 43,
+    "side": "RIGHT",
+    "body": "When the access token expires, every in-flight request gets a 401 at roughly the same moment and each one calls `tokenProvider.refresh()` independently. On page load that is the forecast request, the favorites poll and `/me` all racing to refresh, and each success overwrites the previous tokens. Once refresh tokens rotate (see the comment on `routes/auth.ts`) all but one of those will fail and sign the user out.\n\nMake refresh single-flight: keep one in-progress promise and have concurrent callers await it."
+  },
+  {
+    "id": "c-18",
+    "author": "archwise-bot",
+    "category": "architecture",
+    "severity": "medium",
+    "path": "apps/weather-api/src/routes/auth.ts",
+    "line": 58,
+    "side": "RIGHT",
+    "body": "`/refresh` returns the same refresh token it received. Refresh tokens are therefore valid for their full 90 days no matter how often they are used, and a stolen one keeps working alongside the legitimate client indefinitely with no detection.\n\nTwo common designs:\n- **Rotation.** Each refresh issues a new refresh token and invalidates the old one. A reuse of an old token means theft, and you can revoke the whole family. Needs a small store of issued token ids.\n- **Sliding window.** Each refresh extends expiry but keeps the same token. Simpler, no store, but no theft detection.\n\nGiven we already have an in-memory store, rotation is not much more work. Either way this decision should be made together with where the client stores tokens."
+  },
+  {
+    "id": "c-19",
+    "author": "archwise-bot",
+    "category": "correctness",
+    "severity": "high",
+    "path": "apps/weather-web/src/api/client.ts",
+    "line": 45,
+    "side": "RIGHT",
+    "body": "Unbounded recursion. If the server keeps returning 401 after a successful refresh (for example a user that was deleted, or a token type mismatch), `request()` refreshes and retries forever. Pass a `retried` flag and only attempt the refresh once:\n\n```ts\nasync function request<T>(path: string, init?: RequestInit, retried = false): Promise<T> {\n  ...\n  if (res.status === 401 && tokenProvider && !retried) {\n    const fresh = await tokenProvider.refresh();\n    if (fresh) return request<T>(path, init, true);\n  }\n  ...\n}\n```"
+  },
+  {
+    "id": "c-20",
+    "author": "archwise-bot",
+    "category": "correctness",
+    "severity": "medium",
+    "path": "apps/weather-web/src/auth/AuthContext.tsx",
+    "line": 35,
+    "side": "RIGHT",
+    "body": "`atob` expects standard base64 but JWT segments are base64url (`-` and `_` instead of `+` and `/`, no padding). Any payload containing those characters throws `InvalidCharacterError`, and because `decodeUser` runs inside the `useMemo` the whole app tree crashes on mount with a stale token. Convert to base64 and pad before decoding, and wrap it in a try/catch that clears the stored tokens on failure."
+  },
+  {
+    "id": "c-21",
+    "author": "coverage-bot",
+    "category": "tests",
+    "severity": "medium",
+    "path": "apps/weather-api/src/__tests__/auth.test.ts",
+    "line": 13,
+    "side": "RIGHT",
+    "body": "The only auth test is the register-then-login happy path. Line coverage for `routes/auth.ts` in this PR is **38%**. Untested branches:\n\n- register with a duplicate email → 400\n- register with a missing field → 400\n- login with an unknown email → 401\n- login with a wrong password → 401\n- `/refresh` with an access token instead of a refresh token → 401\n- `/refresh` with a tampered token → 401\n- `/me` without a token → 401\n\nEach of these is a five-line test with `app.request`. Several of them are also the security-relevant branches, so they are worth locking down before the fixes land."
+  },
+  {
+    "id": "c-22",
+    "author": "coverage-bot",
+    "category": "tests",
+    "severity": "medium",
+    "path": "apps/weather-api/src/routes/favorites.ts",
+    "line": 11,
+    "side": "RIGHT",
+    "body": "`routes/favorites.ts` and `store/favorites.ts` have **0%** coverage. No test creates, lists or deletes a favorite, and nothing asserts that user A cannot see or delete user B's favorites. A fake `OpenMeteoClient` already exists in `forecast.test.ts` and can be reused for the enrichment call."
+  },
+  {
+    "id": "c-23",
+    "author": "coverage-bot",
+    "category": "tests",
+    "severity": "medium",
+    "path": "apps/weather-api/src/auth/middleware.ts",
+    "line": 14,
+    "side": "RIGHT",
+    "body": "`auth/middleware.ts` is at **0%** and `auth/jwt.ts` at **45%** (only the signing path runs). Please add cases for: missing header, malformed header, expired token, wrong signature, and a refresh token presented as an access token. A test that a token signed with a different secret is rejected would also have caught the fallback-secret issue flagged on `config.ts`."
+  },
+  {
+    "id": "c-24",
+    "author": "coverage-bot",
+    "category": "tests",
+    "severity": "low",
+    "path": "apps/weather-web/src/auth/AuthContext.tsx",
+    "line": 39,
+    "side": "RIGHT",
+    "body": "Nothing on the web side of this PR is tested: `AuthContext`, `useFavorites`, the 401-refresh logic in `api/client.ts`. The repo currently has no web test setup at all, so this may be a follow-up, but the coverage delta for the PR as a whole is **81% → 64%** and the untested code is the code that handles credentials."
+  },
+  {
+    "id": "c-25",
+    "author": "archwise-bot",
+    "category": "ops",
+    "severity": "high",
+    "path": "apps/weather-api/src/app.ts",
+    "line": 26,
+    "side": "RIGHT",
+    "body": "Rollout hazard. The new web build sends `Authorization` on every request, which turns simple GETs into preflighted requests. The **currently deployed** API does not list `Authorization` in `allowHeaders`, so if the web app ships before the API, every forecast and geocode call fails the CORS preflight and the whole app goes blank for signed-in users.\n\nOrder of operations has to be: API first (with the header allowed and auth routes live), then web. Please note this in the PR description and split the deploy."
+  },
+  {
+    "id": "c-26",
+    "author": "archwise-bot",
+    "category": "ops",
+    "severity": "high",
+    "path": "apps/weather-api/src/config.ts",
+    "line": 15,
+    "side": "RIGHT",
+    "body": "Deploy dependency: `JWT_SECRET` is a new required secret for the API in every environment (dev, staging, prod). Because of the fallback default, a missing value does not fail the deploy, it silently signs tokens with the public dev secret. Provision the secret in all environments **before** the API deploy in the rollout sequence, and make the API refuse to start without it."
+  },
+  {
+    "id": "c-27",
+    "author": "archwise-bot",
+    "category": "ops",
+    "severity": "medium",
+    "path": "apps/weather-web/src/App.tsx",
+    "line": 88,
+    "side": "RIGHT",
+    "body": "Suggest gating the accounts UI (sign-in form, favorites panel, star button) behind a feature flag so the web bundle can ship dark. That decouples the three steps: 1) provision `JWT_SECRET`, 2) deploy API, 3) deploy web with the flag off, 4) flip the flag. It also gives a one-switch rollback if the auth flow misbehaves in production without redeploying."
+  },
+  {
+    "id": "c-28",
+    "author": "nitpick-bot",
+    "category": "style",
+    "severity": "low",
+    "path": "packages/weather-core/src/types.ts",
+    "line": 47,
+    "side": "RIGHT",
+    "body": "`Record<string, any>` defeats type checking for anything reading preferences. Prefer `Record<string, unknown>` or, better, a concrete `UserPreferences` interface."
+  },
+  {
+    "id": "c-29",
+    "author": "nitpick-bot",
+    "category": "style",
+    "severity": "low",
+    "path": "apps/weather-api/src/config.ts",
+    "line": 16,
+    "side": "RIGHT",
+    "body": "Magic numbers. `60 * 60 * 24 * 30` and `60 * 60 * 24 * 90` would read better as `30 * DAY_SEC` with a named constant, and the unit is then obvious at the call site."
+  },
+  {
+    "id": "c-30",
+    "author": "nitpick-bot",
+    "category": "style",
+    "severity": "low",
+    "path": "apps/weather-api/src/auth/jwt.ts",
+    "line": 1,
+    "side": "RIGHT",
+    "body": "`decodeJwt` is imported but never used."
+  },
+  {
+    "id": "c-31",
+    "author": "nitpick-bot",
+    "category": "style",
+    "severity": "low",
+    "path": "apps/weather-api/src/auth/middleware.ts",
+    "line": 18,
+    "side": "RIGHT",
+    "body": "`header.indexOf('Bearer ') == 0` → `header.startsWith('Bearer ')`. Also loose equality; the repo uses `===` everywhere else."
+  },
+  {
+    "id": "c-32",
+    "author": "nitpick-bot",
+    "category": "style",
+    "severity": "low",
+    "path": "apps/weather-api/src/store/users.ts",
+    "line": 22,
+    "side": "RIGHT",
+    "body": "Naming: `fetchUserByEmail` next to `findById`. Pick one verb. `findByEmail` matches the sibling and `fetch` implies I/O, which this is not."
+  },
+  {
+    "id": "c-33",
+    "author": "nitpick-bot",
+    "category": "style",
+    "severity": "low",
+    "path": "apps/weather-api/src/routes/auth.ts",
+    "line": 32,
+    "side": "RIGHT",
+    "body": "Leftover debug `console.log`. The app already has the hono `logger()` middleware; if you want the email in logs, do it there deliberately."
+  },
+  {
+    "id": "c-34",
+    "author": "nitpick-bot",
+    "category": "style",
+    "severity": "low",
+    "path": "apps/weather-api/src/routes/auth.ts",
+    "line": 65,
+    "side": "RIGHT",
+    "body": "Response envelope is inconsistent: `/register` and `/login` return `{ user, tokens }`, `/refresh` returns `{ tokens }`, but `/me` returns the bare user object. Wrap it as `{ user }` so clients can treat all auth responses the same way."
+  },
+  {
+    "id": "c-35",
+    "author": "nitpick-bot",
+    "category": "style",
+    "severity": "low",
+    "path": "apps/weather-api/src/routes/favorites.ts",
+    "line": 17,
+    "side": "RIGHT",
+    "body": "Sequential `await` in a `for` loop. `Promise.all(items.map(...))` reads better and runs the lookups concurrently. (The bigger question of whether the route should do this at all is raised above.)"
+  },
+  {
+    "id": "c-36",
+    "author": "nitpick-bot",
+    "category": "style",
+    "severity": "low",
+    "path": "apps/weather-api/src/routes/favorites.ts",
+    "line": 15,
+    "side": "RIGHT",
+    "body": "`TODO: remove before merge` — this is the merge. Either remove the hack or turn the TODO into a tracked issue and reference it."
+  },
+  {
+    "id": "c-37",
+    "author": "nitpick-bot",
+    "category": "style",
+    "severity": "low",
+    "path": "apps/weather-api/src/app.ts",
+    "line": 35,
+    "side": "RIGHT",
+    "body": "Stray `console.log('routes mounted')` on every app construction, including in tests."
+  },
+  {
+    "id": "c-38",
+    "author": "nitpick-bot",
+    "category": "style",
+    "severity": "low",
+    "path": "apps/weather-web/src/auth/AuthContext.tsx",
+    "line": 22,
+    "side": "RIGHT",
+    "body": "`'skylark.tokens'` is repeated as a literal here while `STORAGE_KEY` exists six lines above. Use the constant."
+  },
+  {
+    "id": "c-39",
+    "author": "nitpick-bot",
+    "category": "style",
+    "severity": "low",
+    "path": "apps/weather-web/src/auth/LoginForm.tsx",
+    "line": 28,
+    "side": "RIGHT",
+    "body": "Inline `style={{ ... }}` objects. The form already has an `auth-form` class with rules in `styles.css`; move `display`, `flexDirection` and `gap` there (and the `margin: 0` on the heading)."
+  },
+  {
+    "id": "c-40",
+    "author": "nitpick-bot",
+    "category": "style",
+    "severity": "low",
+    "path": "apps/weather-web/src/auth/LoginForm.tsx",
+    "line": 32,
+    "side": "RIGHT",
+    "body": "Inputs rely on `placeholder` alone. Placeholders disappear on input and are not reliably announced by screen readers. Add `<label>` elements (visually hidden is fine, there is already a `.visually-hidden` utility in the stylesheet)."
+  },
+  {
+    "id": "c-41",
+    "author": "nitpick-bot",
+    "category": "style",
+    "severity": "low",
+    "path": "apps/weather-web/src/styles.css",
+    "line": 252,
+    "side": "RIGHT",
+    "body": "Hardcoded `#38bdf8` twice here; that colour is already `var(--accent)`."
+  },
+  {
+    "id": "c-42",
+    "author": "nitpick-bot",
+    "category": "style",
+    "severity": "low",
+    "path": "apps/weather-web/src/favorites/FavoritesPanel.tsx",
+    "line": 17,
+    "side": "RIGHT",
+    "body": "Array index as `key`. Favorites have a stable `id`; removing an item from the middle of the list will otherwise re-render and mis-animate every row after it."
+  },
+  {
+    "id": "c-43",
+    "author": "nitpick-bot",
+    "category": "style",
+    "severity": "low",
+    "path": "apps/weather-web/src/favorites/FavoritesPanel.tsx",
+    "line": 36,
+    "side": "RIGHT",
+    "body": "Nested ternary. Extract a `formatFavoriteTemp(favorite, units)` helper, or reuse `formatTemp` from `lib/format.ts`, which already does exactly this conversion."
+  },
+  {
+    "id": "c-44",
+    "author": "nitpick-bot",
+    "category": "style",
+    "severity": "low",
+    "path": "apps/weather-web/src/styles.css",
+    "line": 212,
+    "side": "RIGHT",
+    "body": "`!important` to override `.app`'s own `max-width` from earlier in the same file. Just change the original rule."
+  }
+]

@@ -1,0 +1,1148 @@
+diff --git a/apps/weather-api/package.json b/apps/weather-api/package.json
+index ca5c98b..4903c51 100644
+--- a/apps/weather-api/package.json
++++ b/apps/weather-api/package.json
+@@ -12,7 +12,8 @@
+   "dependencies": {
+     "@hono/node-server": "^1.13.0",
+     "@weather/core": "workspace:*",
+-    "hono": "^4.6.0"
++    "hono": "^4.6.0",
++    "jose": "^5.9.0"
+   },
+   "devDependencies": {
+     "@types/node": "^22.0.0",
+diff --git a/apps/weather-api/src/__tests__/auth.test.ts b/apps/weather-api/src/__tests__/auth.test.ts
+new file mode 100644
+index 0000000..8e9c175
+--- /dev/null
++++ b/apps/weather-api/src/__tests__/auth.test.ts
+@@ -0,0 +1,33 @@
++import { beforeEach, describe, expect, it } from 'vitest';
++import { createApp } from '../app.js';
++import { loadConfig } from '../config.js';
++import { resetUsers } from '../store/users.js';
++
++describe('auth routes', () => {
++  const app = createApp({ config: loadConfig({ JWT_SECRET: 'test-secret' }) });
++
++  beforeEach(() => {
++    resetUsers();
++  });
++
++  it('registers and logs in a user', async () => {
++    const register = await app.request('/api/auth/register', {
++      method: 'POST',
++      headers: { 'Content-Type': 'application/json' },
++      body: JSON.stringify({ email: 'ada@example.com', password: 'hunter22' }),
++    });
++    expect(register.status).toBe(201);
++    const registered = await register.json();
++    expect(registered.user.email).toBe('ada@example.com');
++    expect(registered.tokens.accessToken).toBeTypeOf('string');
++
++    const login = await app.request('/api/auth/login', {
++      method: 'POST',
++      headers: { 'Content-Type': 'application/json' },
++      body: JSON.stringify({ email: 'ada@example.com', password: 'hunter22' }),
++    });
++    expect(login.status).toBe(200);
++    const body = await login.json();
++    expect(body.tokens.refreshToken).toBeTypeOf('string');
++  });
++});
+diff --git a/apps/weather-api/src/app.ts b/apps/weather-api/src/app.ts
+index c269f1a..39f9f2e 100644
+--- a/apps/weather-api/src/app.ts
++++ b/apps/weather-api/src/app.ts
+@@ -4,6 +4,8 @@ import { logger } from 'hono/logger';
+ import { OpenMeteoClient } from '@weather/core';
+ import type { ApiConfig } from './config.js';
+ import { errorResponse } from './lib/errors.js';
++import { authRoutes } from './routes/auth.js';
++import { favoritesRoutes } from './routes/favorites.js';
+ import { forecastRoutes } from './routes/forecast.js';
+ import { geocodeRoutes } from './routes/geocode.js';
+ 
+@@ -16,11 +18,21 @@ export function createApp({ config, client = new OpenMeteoClient() }: AppDeps) {
+   const app = new Hono();
+ 
+   app.use(logger());
+-  app.use('/api/*', cors({ origin: ['http://localhost:5173'] }));
++  app.use(
++    '/api/*',
++    cors({
++      origin: '*',
++      credentials: true,
++      allowHeaders: ['Content-Type', 'Authorization'],
++    }),
++  );
+ 
+   app.get('/health', (c) => c.json({ ok: true }));
+   app.route('/api/geocode', geocodeRoutes(client, config.geocodeCacheTtlMs));
+   app.route('/api/forecast', forecastRoutes(client, config.forecastCacheTtlMs));
++  app.route('/api/auth', authRoutes(config));
++  app.route('/api/favorites', favoritesRoutes(config, client));
++  console.log('routes mounted');
+ 
+   app.onError(errorResponse);
+   app.notFound((c) => c.json({ error: 'Not found' }, 404));
+diff --git a/apps/weather-api/src/auth/jwt.ts b/apps/weather-api/src/auth/jwt.ts
+new file mode 100644
+index 0000000..30e1163
+--- /dev/null
++++ b/apps/weather-api/src/auth/jwt.ts
+@@ -0,0 +1,44 @@
++import { SignJWT, jwtVerify, decodeJwt } from 'jose';
++import type { AuthTokens } from '@weather/core';
++import type { ApiConfig } from '../config.js';
++
++export type TokenType = 'access' | 'refresh';
++
++export interface TokenPayload {
++  sub: string;
++  type: TokenType;
++}
++
++function key(secret: string): Uint8Array {
++  return new TextEncoder().encode(secret);
++}
++
++export async function signToken(
++  secret: string,
++  userId: string,
++  type: TokenType,
++  ttlSec: number,
++): Promise<string> {
++  return new SignJWT({ type })
++    .setProtectedHeader({ alg: 'HS256' })
++    .setSubject(userId)
++    .setIssuedAt()
++    .setExpirationTime(`${ttlSec}s`)
++    .sign(key(secret));
++}
++
++export async function verifyToken(secret: string, token: string): Promise<TokenPayload> {
++  const { payload } = await jwtVerify(token, key(secret));
++  if (typeof payload.sub !== 'string') throw new Error('Token has no subject');
++  const type = payload['type'];
++  if (type !== 'access' && type !== 'refresh') throw new Error('Unknown token type');
++  return { sub: payload.sub, type };
++}
++
++export async function issueTokens(config: ApiConfig, userId: string): Promise<AuthTokens> {
++  const [accessToken, refreshToken] = await Promise.all([
++    signToken(config.jwtSecret, userId, 'access', config.accessTokenTtlSec),
++    signToken(config.jwtSecret, userId, 'refresh', config.refreshTokenTtlSec),
++  ]);
++  return { accessToken, refreshToken, expiresIn: config.accessTokenTtlSec };
++}
+diff --git a/apps/weather-api/src/auth/middleware.ts b/apps/weather-api/src/auth/middleware.ts
+new file mode 100644
+index 0000000..c36fad3
+--- /dev/null
++++ b/apps/weather-api/src/auth/middleware.ts
+@@ -0,0 +1,36 @@
++import { createMiddleware } from 'hono/factory';
++import { verifyToken } from './jwt.js';
++
++export type AuthEnv = {
++  Variables: {
++    userId: string;
++  };
++};
++
++/**
++ * Requires a valid access token. Accepts `Authorization: Bearer <token>`
++ * or, for simple links and debugging, a `?token=` query parameter.
++ */
++export function requireAuth(secret: string) {
++  return createMiddleware<AuthEnv>(async (c, next) => {
++    const header = c.req.header('authorization');
++    let token: string | undefined;
++    if (header && header.indexOf('Bearer ') == 0) {
++      token = header.slice('Bearer '.length);
++    }
++    if (!token) {
++      token = c.req.query('token');
++    }
++    if (!token) {
++      return c.json({ error: 'Unauthorized' }, 401);
++    }
++    try {
++      const payload = await verifyToken(secret, token);
++      if (payload.type !== 'access') throw new Error('Not an access token');
++      c.set('userId', payload.sub);
++    } catch {
++      return c.json({ error: 'Unauthorized' }, 401);
++    }
++    await next();
++  });
++}
+diff --git a/apps/weather-api/src/auth/password.ts b/apps/weather-api/src/auth/password.ts
+new file mode 100644
+index 0000000..8823a22
+--- /dev/null
++++ b/apps/weather-api/src/auth/password.ts
+@@ -0,0 +1,10 @@
++import { createHash } from 'node:crypto';
++
++/** Hash a password for storage. */
++export function hashPassword(password: string): string {
++  return createHash('sha256').update(password).digest('hex');
++}
++
++export function verifyPassword(password: string, hash: string): boolean {
++  return hashPassword(password) === hash;
++}
+diff --git a/apps/weather-api/src/config.ts b/apps/weather-api/src/config.ts
+index dad331c..b5cf709 100644
+--- a/apps/weather-api/src/config.ts
++++ b/apps/weather-api/src/config.ts
+@@ -2,6 +2,9 @@ export interface ApiConfig {
+   port: number;
+   forecastCacheTtlMs: number;
+   geocodeCacheTtlMs: number;
++  jwtSecret: string;
++  accessTokenTtlSec: number;
++  refreshTokenTtlSec: number;
+ }
+ 
+ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
+@@ -9,5 +12,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
+     port: Number(env.PORT ?? 8787),
+     forecastCacheTtlMs: Number(env.FORECAST_CACHE_TTL_MS ?? 10 * 60 * 1000),
+     geocodeCacheTtlMs: Number(env.GEOCODE_CACHE_TTL_MS ?? 24 * 60 * 60 * 1000),
++    jwtSecret: env.JWT_SECRET ?? 'dev-secret-change-me',
++    accessTokenTtlSec: Number(env.ACCESS_TOKEN_TTL_SEC ?? 60 * 60 * 24 * 30),
++    refreshTokenTtlSec: Number(env.REFRESH_TOKEN_TTL_SEC ?? 60 * 60 * 24 * 90),
+   };
+ }
+diff --git a/apps/weather-api/src/routes/auth.ts b/apps/weather-api/src/routes/auth.ts
+new file mode 100644
+index 0000000..60eba0a
+--- /dev/null
++++ b/apps/weather-api/src/routes/auth.ts
+@@ -0,0 +1,73 @@
++import { Hono } from 'hono';
++import type { ApiConfig } from '../config.js';
++import { HttpError, badRequest, notFound } from '../lib/errors.js';
++import { issueTokens, signToken, verifyToken } from '../auth/jwt.js';
++import { requireAuth, type AuthEnv } from '../auth/middleware.js';
++import { hashPassword, verifyPassword } from '../auth/password.js';
++import { createUser, fetchUserByEmail, findById, toPublicUser } from '../store/users.js';
++
++interface Credentials {
++  email?: string;
++  password?: string;
++}
++
++export function authRoutes(config: ApiConfig) {
++  const router = new Hono<AuthEnv>();
++
++  router.post('/register', async (c) => {
++    const body = await c.req.json<Credentials>();
++    if (!body.email || !body.password) {
++      throw badRequest('email and password are required');
++    }
++    if (fetchUserByEmail(body.email)) {
++      throw badRequest('Email already registered');
++    }
++    const user = createUser(body.email, hashPassword(body.password));
++    const tokens = await issueTokens(config, user.id);
++    return c.json({ user: toPublicUser(user), tokens }, 201);
++  });
++
++  router.post('/login', async (c) => {
++    const body = await c.req.json<Credentials>();
++    console.log('login attempt', body.email);
++    const user = fetchUserByEmail(body.email ?? '');
++    if (!user) {
++      throw new HttpError(401, 'No account exists for this email');
++    }
++    if (!verifyPassword(body.password ?? '', user.passwordHash)) {
++      throw new HttpError(401, 'Incorrect password');
++    }
++    const tokens = await issueTokens(config, user.id);
++    return c.json({ user: toPublicUser(user), tokens });
++  });
++
++  router.post('/refresh', async (c) => {
++    const { refreshToken } = await c.req.json<{ refreshToken?: string }>();
++    if (!refreshToken) throw badRequest('refreshToken is required');
++    const payload = await verifyToken(config.jwtSecret, refreshToken).catch(() => null);
++    if (!payload || payload.type !== 'refresh') {
++      throw new HttpError(401, 'Invalid refresh token');
++    }
++    const accessToken = await signToken(
++      config.jwtSecret,
++      payload.sub,
++      'access',
++      config.accessTokenTtlSec,
++    );
++    return c.json({
++      tokens: { accessToken, refreshToken, expiresIn: config.accessTokenTtlSec },
++    });
++  });
++
++  router.get('/me', requireAuth(config.jwtSecret), (c) => {
++    const user = findById(c.get('userId'));
++    if (!user) throw notFound('User not found');
++    return c.json(toPublicUser(user));
++  });
++
++  router.post('/logout', requireAuth(config.jwtSecret), (c) => {
++    return c.json({ ok: true });
++  });
++
++  return router;
++}
+diff --git a/apps/weather-api/src/routes/favorites.ts b/apps/weather-api/src/routes/favorites.ts
+new file mode 100644
+index 0000000..9b84784
+--- /dev/null
++++ b/apps/weather-api/src/routes/favorites.ts
+@@ -0,0 +1,47 @@
++import { Hono } from 'hono';
++import type { FavoriteInput, FavoriteWithWeather, OpenMeteoClient } from '@weather/core';
++import type { ApiConfig } from '../config.js';
++import { notFound } from '../lib/errors.js';
++import { requireAuth, type AuthEnv } from '../auth/middleware.js';
++import { addFavorite, listFavorites, removeFavorite } from '../store/favorites.js';
++
++export function favoritesRoutes(config: ApiConfig, client: OpenMeteoClient) {
++  const router = new Hono<AuthEnv>();
++
++  router.use('*', requireAuth(config.jwtSecret));
++
++  router.get('/', async (c) => {
++    const items = listFavorites(c.get('userId'));
++    // TODO: remove before merge - quick hack so the panel shows live temps
++    const enriched: FavoriteWithWeather[] = [];
++    for (const favorite of items) {
++      const forecast = await client.forecast({
++        name: favorite.name,
++        country: favorite.country,
++        latitude: favorite.latitude,
++        longitude: favorite.longitude,
++        timezone: favorite.timezone,
++      });
++      enriched.push({
++        ...favorite,
++        temperatureC: forecast.current.temperatureC,
++        weatherCode: forecast.current.weatherCode,
++      });
++    }
++    return c.json({ favorites: enriched });
++  });
++
++  router.post('/', async (c) => {
++    const body = await c.req.json<FavoriteInput>();
++    const favorite = addFavorite(c.get('userId'), body);
++    return c.json({ favorite }, 201);
++  });
++
++  router.delete('/:id', (c) => {
++    const removed = removeFavorite(c.req.param('id'));
++    if (!removed) throw notFound('Favorite not found');
++    return c.body(null, 204);
++  });
++
++  return router;
++}
+diff --git a/apps/weather-api/src/store/favorites.ts b/apps/weather-api/src/store/favorites.ts
+new file mode 100644
+index 0000000..097d050
+--- /dev/null
++++ b/apps/weather-api/src/store/favorites.ts
+@@ -0,0 +1,40 @@
++import { randomUUID } from 'node:crypto';
++import type { Favorite, FavoriteInput } from '@weather/core';
++import { notFound } from '../lib/errors.js';
++import { findById } from './users.js';
++
++const favorites = new Map<string, Favorite>();
++
++export function listFavorites(userId: string): Favorite[] {
++  let result: Favorite[] = [];
++  for (const favorite of favorites.values()) {
++    if (favorite.userId === userId) result.push(favorite);
++  }
++  return result;
++}
++
++export function addFavorite(userId: string, input: FavoriteInput): Favorite {
++  if (!findById(userId)) throw notFound('User not found');
++  const favorite: Favorite = {
++    id: randomUUID(),
++    userId,
++    ...input,
++    createdAt: new Date().toISOString(),
++  };
++  favorites.set(favorite.id, favorite);
++  return favorite;
++}
++
++export function removeFavorite(id: string): boolean {
++  return favorites.delete(id);
++}
++
++export function removeFavoritesForUser(userId: string): void {
++  for (const favorite of listFavorites(userId)) {
++    favorites.delete(favorite.id);
++  }
++}
++
++export function resetFavorites(): void {
++  favorites.clear();
++}
+diff --git a/apps/weather-api/src/store/users.ts b/apps/weather-api/src/store/users.ts
+new file mode 100644
+index 0000000..65cade5
+--- /dev/null
++++ b/apps/weather-api/src/store/users.ts
+@@ -0,0 +1,46 @@
++import { randomUUID } from 'node:crypto';
++import type { User } from '@weather/core';
++import { removeFavoritesForUser } from './favorites.js';
++
++export interface StoredUser extends User {
++  passwordHash: string;
++}
++
++const users = new Map<string, StoredUser>();
++
++export function createUser(email: string, passwordHash: string): StoredUser {
++  const user: StoredUser = {
++    id: randomUUID(),
++    email,
++    passwordHash,
++    createdAt: new Date().toISOString(),
++  };
++  users.set(user.id, user);
++  return user;
++}
++
++export function fetchUserByEmail(email: string): StoredUser | undefined {
++  for (const user of users.values()) {
++    if (user.email === email) return user;
++  }
++  return undefined;
++}
++
++export function findById(id: string): StoredUser | undefined {
++  return users.get(id);
++}
++
++export function deleteUser(id: string): boolean {
++  const existed = users.delete(id);
++  if (existed) removeFavoritesForUser(id);
++  return existed;
++}
++
++export function toPublicUser(user: StoredUser): User {
++  const { passwordHash: _passwordHash, ...publicUser } = user;
++  return publicUser;
++}
++
++export function resetUsers(): void {
++  users.clear();
++}
+diff --git a/apps/weather-web/src/App.tsx b/apps/weather-web/src/App.tsx
+index ae50e19..6d4aef9 100644
+--- a/apps/weather-web/src/App.tsx
++++ b/apps/weather-web/src/App.tsx
+@@ -1,19 +1,59 @@
+-import { useState } from 'react';
++import { useEffect, useState } from 'react';
+ import type { GeoLocation, Units } from '@weather/core';
++import { AuthProvider, useAuth } from './auth/AuthContext';
++import { LoginForm } from './auth/LoginForm';
+ import { CurrentConditions } from './components/CurrentConditions';
+ import { ForecastList } from './components/ForecastList';
+ import { SearchBox } from './components/SearchBox';
++import { FavoritesPanel } from './favorites/FavoritesPanel';
++import { useFavorites } from './favorites/useFavorites';
+ import { useForecast } from './hooks/useForecast';
+ 
+ export function App() {
++  return (
++    <AuthProvider>
++      <Shell />
++    </AuthProvider>
++  );
++}
++
++function Shell() {
++  const { user, logout } = useAuth();
+   const [location, setLocation] = useState<GeoLocation | null>(null);
+   const [units, setUnits] = useState<Units>('metric');
+   const { forecast, loading, error } = useForecast(location);
++  const { items, add, remove } = useFavorites(user !== null);
++
++  const saved = location
++    ? items.find((f) => f.latitude === location.latitude && f.longitude === location.longitude)
++    : undefined;
++
++  function toggleSave() {
++    if (!location) return;
++    if (saved) {
++      remove(saved.id);
++    } else {
++      add({
++        name: location.name,
++        country: location.country,
++        latitude: location.latitude,
++        longitude: location.longitude,
++        timezone: location.timezone,
++      });
++    }
++  }
+ 
+   return (
+     <main className="app">
+       <header className="app-header">
+-        <h1>Skylark</h1>
++        <div className="app-title">
++          <h1>Skylark</h1>
++          {user && (
++            <button type="button" className="link" onClick={logout}>
++              Sign out
++            </button>
++          )}
++        </div>
+         <div className="app-controls">
+           <SearchBox onSelect={setLocation} />
+           <button
+@@ -27,15 +67,31 @@ export function App() {
+         </div>
+       </header>
+ 
+-      {!location && <p className="empty">Search for a city to see the forecast.</p>}
+-      {loading && <p className="status">Loading forecast…</p>}
+-      {error && <p className="status error">{error}</p>}
+-      {forecast && (
+-        <>
+-          <CurrentConditions forecast={forecast} units={units} />
+-          <ForecastList days={forecast.daily} units={units} />
+-        </>
+-      )}
++      <div className="layout">
++        <div className="layout-main">
++          {!location && <p className="empty">Search for a city to see the forecast.</p>}
++          {loading && <p className="status">Loading forecast…</p>}
++          {error && <p className="status error">{error}</p>}
++          {forecast && (
++            <>
++              <CurrentConditions
++                forecast={forecast}
++                units={units}
++                saved={user ? saved !== undefined : undefined}
++                onSave={user ? toggleSave : undefined}
++              />
++              <ForecastList days={forecast.daily} units={units} />
++            </>
++          )}
++        </div>
++        <div className="layout-side">
++          {user ? (
++            <FavoritesPanel items={items} units={units} onSelect={setLocation} onRemove={remove} />
++          ) : (
++            <LoginForm />
++          )}
++        </div>
++      </div>
+     </main>
+   );
+ }
+diff --git a/apps/weather-web/src/api/client.ts b/apps/weather-web/src/api/client.ts
+index 1ab82ad..72e5af0 100644
+--- a/apps/weather-web/src/api/client.ts
++++ b/apps/weather-web/src/api/client.ts
+@@ -1,4 +1,12 @@
+-import type { Forecast, GeoLocation } from '@weather/core';
++import type {
++  AuthTokens,
++  Favorite,
++  FavoriteInput,
++  FavoriteWithWeather,
++  Forecast,
++  GeoLocation,
++  User,
++} from '@weather/core';
+ 
+ export class ApiError extends Error {
+   constructor(
+@@ -10,15 +18,38 @@ export class ApiError extends Error {
+   }
+ }
+ 
++export interface TokenProvider {
++  getAccessToken(): string | null;
++  refresh(): Promise<string | null>;
++}
++
++let tokenProvider: TokenProvider | null = null;
++
++export function setTokenProvider(provider: TokenProvider | null): void {
++  tokenProvider = provider;
++}
++
+ async function request<T>(path: string, init?: RequestInit): Promise<T> {
++  const token = tokenProvider?.getAccessToken();
+   const res = await fetch(path, {
+     ...init,
+-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
++    headers: {
++      'Content-Type': 'application/json',
++      ...(token ? { Authorization: `Bearer ${token}` } : {}),
++      ...(init?.headers ?? {}),
++    },
+   });
++  if (res.status === 401 && tokenProvider) {
++    const fresh = await tokenProvider.refresh();
++    if (fresh) {
++      return request<T>(path, init);
++    }
++  }
+   if (!res.ok) {
+-    const body = (await res.json().catch(() => ({}))) as { error?: string };
++    const body = (await res.json().catch(() => ({}))) as any;
+     throw new ApiError(res.status, body.error ?? res.statusText);
+   }
++  if (res.status === 204) return undefined as T;
+   return (await res.json()) as T;
+ }
+ 
+@@ -36,3 +67,44 @@ export function fetchForecast(location: GeoLocation): Promise<Forecast> {
+   });
+   return request(`/api/forecast?${params}`);
+ }
++
++export interface AuthResponse {
++  user: User;
++  tokens: AuthTokens;
++}
++
++export const auth = {
++  register(email: string, password: string): Promise<AuthResponse> {
++    return request('/api/auth/register', {
++      method: 'POST',
++      body: JSON.stringify({ email, password }),
++    });
++  },
++  login(email: string, password: string): Promise<AuthResponse> {
++    return request('/api/auth/login', {
++      method: 'POST',
++      body: JSON.stringify({ email, password }),
++    });
++  },
++  refresh(refreshToken: string): Promise<{ tokens: AuthTokens }> {
++    return request('/api/auth/refresh', {
++      method: 'POST',
++      body: JSON.stringify({ refreshToken }),
++    });
++  },
++  me(): Promise<User> {
++    return request('/api/auth/me');
++  },
++};
++
++export const favorites = {
++  list(): Promise<{ favorites: FavoriteWithWeather[] }> {
++    return request('/api/favorites');
++  },
++  add(input: FavoriteInput): Promise<{ favorite: Favorite }> {
++    return request('/api/favorites', { method: 'POST', body: JSON.stringify(input) });
++  },
++  remove(id: string): Promise<void> {
++    return request(`/api/favorites/${id}`, { method: 'DELETE' });
++  },
++};
+diff --git a/apps/weather-web/src/auth/AuthContext.tsx b/apps/weather-web/src/auth/AuthContext.tsx
+new file mode 100644
+index 0000000..26b3a88
+--- /dev/null
++++ b/apps/weather-web/src/auth/AuthContext.tsx
+@@ -0,0 +1,90 @@
++import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
++import type { ReactNode } from 'react';
++import type { AuthTokens } from '@weather/core';
++import { auth, setTokenProvider } from '../api/client';
++
++const STORAGE_KEY = 'skylark.tokens';
++
++interface AuthUser {
++  id: string;
++}
++
++interface AuthContextValue {
++  user: AuthUser | null;
++  login: (email: string, password: string) => Promise<AuthTokens>;
++  register: (email: string, password: string) => Promise<AuthTokens>;
++  logout: () => void;
++}
++
++const AuthContext = createContext<AuthContextValue | null>(null);
++
++function readTokens(): AuthTokens | null {
++  const raw = localStorage.getItem('skylark.tokens');
++  return raw ? (JSON.parse(raw) as AuthTokens) : null;
++}
++
++function persistTokens(tokens: AuthTokens | null): void {
++  if (tokens) {
++    localStorage.setItem(STORAGE_KEY, JSON.stringify(tokens));
++  } else {
++    localStorage.removeItem(STORAGE_KEY);
++  }
++}
++
++function decodeUser(accessToken: string): AuthUser {
++  const payload = JSON.parse(atob(accessToken.split('.')[1]!)) as { sub: string };
++  return { id: payload.sub };
++}
++
++export function AuthProvider({ children }: { children: ReactNode }) {
++  const [tokens, setTokens] = useState<AuthTokens | null>(readTokens);
++
++  const update = useCallback((next: AuthTokens | null) => {
++    persistTokens(next);
++    setTokens(next);
++  }, []);
++
++  useEffect(() => {
++    setTokenProvider({
++      getAccessToken: () => tokens?.accessToken ?? null,
++      refresh: async () => {
++        if (!tokens) return null;
++        try {
++          const res = await auth.refresh(tokens.refreshToken);
++          update(res.tokens);
++          return res.tokens.accessToken;
++        } catch {
++          update(null);
++          return null;
++        }
++      },
++    });
++    return () => setTokenProvider(null);
++  }, [tokens, update]);
++
++  const value = useMemo<AuthContextValue>(
++    () => ({
++      user: tokens ? decodeUser(tokens.accessToken) : null,
++      login: async (email, password) => {
++        const res = await auth.login(email, password);
++        update(res.tokens);
++        return res.tokens;
++      },
++      register: async (email, password) => {
++        const res = await auth.register(email, password);
++        update(res.tokens);
++        return res.tokens;
++      },
++      logout: () => update(null),
++    }),
++    [tokens, update],
++  );
++
++  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
++}
++
++export function useAuth(): AuthContextValue {
++  const ctx = useContext(AuthContext);
++  if (!ctx) throw new Error('useAuth must be used inside <AuthProvider>');
++  return ctx;
++}
+diff --git a/apps/weather-web/src/auth/LoginForm.tsx b/apps/weather-web/src/auth/LoginForm.tsx
+new file mode 100644
+index 0000000..cff9467
+--- /dev/null
++++ b/apps/weather-web/src/auth/LoginForm.tsx
+@@ -0,0 +1,57 @@
++import { useState } from 'react';
++import type { FormEvent } from 'react';
++import { useAuth } from './AuthContext';
++
++export function LoginForm() {
++  const { login, register } = useAuth();
++  const [mode, setMode] = useState<'login' | 'register'>('login');
++  const [email, setEmail] = useState('');
++  const [password, setPassword] = useState('');
++  const [error, setError] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  async function onSubmit(e: FormEvent) {
++    e.preventDefault();
++    setBusy(true);
++    setError(null);
++    try {
++      const tokens = mode === 'login' ? await login(email, password) : await register(email, password);
++      console.log('auth response', tokens);
++    } catch (err: any) {
++      setError(err.message ?? 'Something went wrong');
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <form className="auth-form" onSubmit={onSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
++      <h3 style={{ margin: 0 }}>{mode === 'login' ? 'Sign in' : 'Create account'}</h3>
++      <input
++        type="email"
++        placeholder="Email"
++        value={email}
++        onChange={(e) => setEmail(e.target.value)}
++        required
++      />
++      <input
++        type="password"
++        placeholder="Password"
++        value={password}
++        onChange={(e) => setPassword(e.target.value)}
++        required
++      />
++      {error && <p className="status error">{error}</p>}
++      <button type="submit" disabled={busy}>
++        {mode === 'login' ? 'Sign in' : 'Register'}
++      </button>
++      <button
++        type="button"
++        className="link"
++        onClick={() => setMode(mode === 'login' ? 'register' : 'login')}
++      >
++        {mode === 'login' ? 'Need an account? Register' : 'Have an account? Sign in'}
++      </button>
++    </form>
++  );
++}
+diff --git a/apps/weather-web/src/components/CurrentConditions.tsx b/apps/weather-web/src/components/CurrentConditions.tsx
+index 10eecb6..4fe5aa7 100644
+--- a/apps/weather-web/src/components/CurrentConditions.tsx
++++ b/apps/weather-web/src/components/CurrentConditions.tsx
+@@ -5,19 +5,32 @@ import { formatTemp, formatWind } from '../lib/format';
+ interface Props {
+   forecast: Forecast;
+   units: Units;
++  saved?: boolean;
++  onSave?: () => void;
+ }
+ 
+-export function CurrentConditions({ forecast, units }: Props) {
++export function CurrentConditions({ forecast, units, saved, onSave }: Props) {
+   const { current, location } = forecast;
+   const { label, icon } = describeWeatherCode(current.weatherCode);
+ 
+   return (
+     <section className="current" aria-label="Current conditions">
+-      <header>
++      <header className="current-header">
+         <h2>
+           {location.name}
+           {location.country ? <span className="muted">, {location.country}</span> : null}
+         </h2>
++        {onSave && (
++          <button
++            type="button"
++            className={saved ? 'save-button saved' : 'save-button'}
++            onClick={onSave}
++            aria-pressed={saved}
++            aria-label={saved ? 'Saved to favorites' : 'Save to favorites'}
++          >
++            {saved ? '★' : '☆'}
++          </button>
++        )}
+       </header>
+       <div className="current-main">
+         <span className="current-icon" aria-hidden="true">
+diff --git a/apps/weather-web/src/favorites/FavoritesPanel.tsx b/apps/weather-web/src/favorites/FavoritesPanel.tsx
+new file mode 100644
+index 0000000..e8f97e2
+--- /dev/null
++++ b/apps/weather-web/src/favorites/FavoritesPanel.tsx
+@@ -0,0 +1,57 @@
++import type { FavoriteWithWeather, GeoLocation, Units } from '@weather/core';
++import { celsiusToFahrenheit, describeWeatherCode } from '@weather/core';
++
++interface Props {
++  items: FavoriteWithWeather[];
++  units: Units;
++  onSelect: (location: GeoLocation) => void;
++  onRemove: (id: string) => void;
++}
++
++export function FavoritesPanel({ items, units, onSelect, onRemove }: Props) {
++  return (
++    <aside className="favorites" aria-label="Favorite locations">
++      <h3>Favorites</h3>
++      <ul className="favorites-list">
++        {items.map((favorite, index) => (
++          <li key={index} className="favorite">
++            <button
++              type="button"
++              className="favorite-name"
++              onClick={() =>
++                onSelect({
++                  id: index,
++                  name: favorite.name,
++                  country: favorite.country,
++                  latitude: favorite.latitude,
++                  longitude: favorite.longitude,
++                  timezone: favorite.timezone,
++                })
++              }
++            >
++              {favorite.name}
++            </button>
++            <span className="favorite-temp">
++              {favorite.temperatureC !== undefined
++                ? units === 'metric'
++                  ? `${Math.round(favorite.temperatureC)}°C`
++                  : `${celsiusToFahrenheit(favorite.temperatureC)}°F`
++                : '—'}
++            </span>
++            <span aria-hidden="true">
++              {favorite.weatherCode !== undefined ? describeWeatherCode(favorite.weatherCode).icon : ''}
++            </span>
++            <button
++              type="button"
++              className="favorite-remove"
++              aria-label={`Remove ${favorite.name}`}
++              onClick={() => onRemove(favorite.id)}
++            >
++              ×
++            </button>
++          </li>
++        ))}
++      </ul>
++    </aside>
++  );
++}
+diff --git a/apps/weather-web/src/favorites/useFavorites.ts b/apps/weather-web/src/favorites/useFavorites.ts
+new file mode 100644
+index 0000000..b028b43
+--- /dev/null
++++ b/apps/weather-web/src/favorites/useFavorites.ts
+@@ -0,0 +1,47 @@
++import { useCallback, useEffect, useState } from 'react';
++import type { FavoriteInput, FavoriteWithWeather } from '@weather/core';
++import { favorites as favoritesApi } from '../api/client';
++
++export function useFavorites(enabled: boolean) {
++  const [items, setItems] = useState<FavoriteWithWeather[]>([]);
++
++  useEffect(() => {
++    if (!enabled) {
++      setItems([]);
++      return;
++    }
++    let active = true;
++    const load = () =>
++      favoritesApi
++        .list()
++        .then((res) => {
++          if (active) setItems(res.favorites);
++        })
++        .catch(() => {});
++    load();
++    const handle = setInterval(load, 5000);
++    return () => {
++      active = false;
++      clearInterval(handle);
++    };
++  }, [enabled]);
++
++  const add = useCallback(async (input: FavoriteInput) => {
++    const optimistic: FavoriteWithWeather = {
++      ...input,
++      id: `tmp-${Date.now()}`,
++      userId: '',
++      createdAt: new Date().toISOString(),
++    };
++    setItems((prev) => [...prev, optimistic]);
++    const { favorite } = await favoritesApi.add(input);
++    setItems((prev) => prev.map((f) => (f.id === optimistic.id ? favorite : f)));
++  }, []);
++
++  const remove = useCallback(async (id: string) => {
++    setItems((prev) => prev.filter((f) => f.id !== id));
++    await favoritesApi.remove(id);
++  }, []);
++
++  return { items, add, remove };
++}
+diff --git a/apps/weather-web/src/styles.css b/apps/weather-web/src/styles.css
+index 5a0b731..1aa1899 100644
+--- a/apps/weather-web/src/styles.css
++++ b/apps/weather-web/src/styles.css
+@@ -205,3 +205,125 @@ body {
+   clip: rect(0 0 0 0);
+   white-space: nowrap;
+ }
++
++/* --- accounts & favorites --- */
++
++.app {
++  max-width: 1040px !important;
++}
++
++.app-title {
++  display: flex;
++  align-items: baseline;
++  justify-content: space-between;
++}
++
++.layout {
++  display: grid;
++  grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr);
++  gap: 1.5rem;
++  align-items: start;
++}
++
++@media (max-width: 720px) {
++  .layout {
++    grid-template-columns: 1fr;
++  }
++}
++
++.current-header {
++  display: flex;
++  justify-content: space-between;
++  align-items: center;
++}
++
++.save-button {
++  background: transparent;
++  border: 1px solid #334155;
++  border-radius: 999px;
++  color: var(--muted);
++  font-size: 1.25rem;
++  width: 2.5rem;
++  height: 2.5rem;
++  cursor: pointer;
++}
++
++.save-button.saved {
++  color: #38bdf8;
++  border-color: #38bdf8;
++}
++
++.favorites,
++.auth-form {
++  background: var(--panel);
++  border-radius: var(--radius);
++  padding: 1.25rem;
++}
++
++.favorites h3,
++.auth-form h3 {
++  margin: 0 0 1rem;
++}
++
++.favorites-list {
++  list-style: none;
++  margin: 0;
++  padding: 0;
++  display: flex;
++  flex-direction: column;
++  gap: 0.5rem;
++}
++
++.favorite {
++  display: grid;
++  grid-template-columns: 1fr auto auto auto;
++  gap: 0.5rem;
++  align-items: center;
++  padding: 0.5rem 0.6rem;
++  background: var(--panel-2);
++  border-radius: 8px;
++}
++
++.favorite-name {
++  background: transparent;
++  border: 0;
++  color: var(--text);
++  text-align: left;
++  cursor: pointer;
++  font-size: 1rem;
++  padding: 0;
++}
++
++.favorite-remove {
++  background: transparent;
++  border: 0;
++  color: var(--muted);
++  cursor: pointer;
++  font-size: 1.1rem;
++}
++
++.auth-form input {
++  padding: 0.6rem 0.8rem;
++  border-radius: 8px;
++  border: 1px solid #334155;
++  background: var(--panel-2);
++  color: var(--text);
++}
++
++.auth-form button[type='submit'] {
++  padding: 0.6rem;
++  border-radius: 8px;
++  border: 0;
++  background: var(--accent);
++  color: #0f172a;
++  font-weight: 600;
++  cursor: pointer;
++}
++
++.link {
++  background: transparent;
++  border: 0;
++  color: var(--accent);
++  cursor: pointer;
++  padding: 0;
++}
+diff --git a/packages/weather-core/src/types.ts b/packages/weather-core/src/types.ts
+index e23ff43..af74e4b 100644
+--- a/packages/weather-core/src/types.ts
++++ b/packages/weather-core/src/types.ts
+@@ -38,3 +38,38 @@ export interface Forecast {
+ }
+ 
+ export type Units = 'metric' | 'imperial';
++
++/** A registered account. Passwords never leave the API. */
++export interface User {
++  id: string;
++  email: string;
++  createdAt: string;
++  preferences?: Record<string, any>;
++}
++
++/** Token pair returned by the auth endpoints. */
++export interface AuthTokens {
++  accessToken: string;
++  refreshToken: string;
++  expiresIn: number;
++}
++
++/** A saved location that syncs across a user's devices. */
++export interface Favorite {
++  id: string;
++  userId: string;
++  name: string;
++  country: string;
++  latitude: number;
++  longitude: number;
++  timezone: string;
++  createdAt: string;
++}
++
++export type FavoriteInput = Omit<Favorite, 'id' | 'userId' | 'createdAt'>;
++
++/** Favorite enriched with a live reading for the favorites panel. */
++export interface FavoriteWithWeather extends Favorite {
++  temperatureC?: number;
++  weatherCode?: number;
++}
