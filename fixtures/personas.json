@@ -1,0 +1,26 @@
+{
+  "sentinel-bot": {
+    "name": "sentinel-bot",
+    "emoji": "🛡️",
+    "role": "Security reviewer",
+    "focus": "authentication, authorization, secrets, data exposure"
+  },
+  "archwise-bot": {
+    "name": "archwise-bot",
+    "emoji": "🏛️",
+    "role": "Architecture reviewer",
+    "focus": "module boundaries, dependencies, correctness, rollout risk"
+  },
+  "coverage-bot": {
+    "name": "coverage-bot",
+    "emoji": "🧪",
+    "role": "Test coverage reviewer",
+    "focus": "untested paths, coverage deltas, missing edge cases"
+  },
+  "nitpick-bot": {
+    "name": "nitpick-bot",
+    "emoji": "🔍",
+    "role": "Style reviewer",
+    "focus": "naming, formatting, lint-level consistency"
+  }
+}

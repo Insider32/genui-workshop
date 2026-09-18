@@ -1,0 +1,40 @@
+{
+  "number": 1,
+  "title": "feat(accounts): user accounts with synced favorite locations",
+  "base": "main",
+  "head": "feature/user-accounts",
+  "author": "skylark-dev",
+  "body": "## Summary\n\nAdds registration, login and token refresh to the API using HS256 JWTs, plus a favorites resource scoped to the signed-in user. The web app gets an auth context, a sign-in form, a favorites panel that polls for changes, and a save-to-favorites star on the current conditions card.\n\n## Changes\n\n- **API**: `/api/auth/{register,login,refresh,me,logout}`, `/api/favorites` CRUD, `requireAuth` middleware\n- **Stores**: in-memory user and favorites stores (persistence to follow in a separate PR)\n- **Web**: `AuthProvider` with token storage, `LoginForm`, `FavoritesPanel`, `useFavorites` polling hook\n- **Core**: `User`, `AuthTokens`, `Favorite`, `FavoriteWithWeather` types\n\n## Testing\n\n- Added `auth.test.ts` covering register + login happy path\n- Manually tested sign in, save favorite, remove favorite, sign out in Chrome\n\n## Notes\n\nThe `JWT_SECRET` env var is new. Defaults to a dev value locally.",
+  "labels": [
+    "feature",
+    "auth",
+    "needs-review"
+  ],
+  "files": [
+    "apps/weather-api/package.json",
+    "apps/weather-api/src/__tests__/auth.test.ts",
+    "apps/weather-api/src/app.ts",
+    "apps/weather-api/src/auth/jwt.ts",
+    "apps/weather-api/src/auth/middleware.ts",
+    "apps/weather-api/src/auth/password.ts",
+    "apps/weather-api/src/config.ts",
+    "apps/weather-api/src/routes/auth.ts",
+    "apps/weather-api/src/routes/favorites.ts",
+    "apps/weather-api/src/store/favorites.ts",
+    "apps/weather-api/src/store/users.ts",
+    "apps/weather-web/src/App.tsx",
+    "apps/weather-web/src/api/client.ts",
+    "apps/weather-web/src/auth/AuthContext.tsx",
+    "apps/weather-web/src/auth/LoginForm.tsx",
+    "apps/weather-web/src/components/CurrentConditions.tsx",
+    "apps/weather-web/src/favorites/FavoritesPanel.tsx",
+    "apps/weather-web/src/favorites/useFavorites.ts",
+    "apps/weather-web/src/styles.css",
+    "packages/weather-core/src/types.ts"
+  ],
+  "stats": {
+    "files": 20,
+    "additions": 915,
+    "deletions": 18
+  }
+}

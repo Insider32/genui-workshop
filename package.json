@@ -4,17 +4,24 @@
   "version": "0.1.0",
   "description": "Generative UI workshop: the same 40 PR review comments rendered at four levels of UI generativity",
   "packageManager": "pnpm@11.9.0",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test",
     "build": "pnpm -r --if-present build",
     "weather:api": "pnpm --filter @weather/api dev",
     "weather:web": "pnpm --filter @weather/web dev",
-    "phase1:seed": "pnpm --filter @workshop/phase1-seed seed",
     "phase2": "pnpm --filter @workshop/phase2-report generate",
+    "phase2:check": "pnpm --filter @workshop/phase2-report check",
     "phase3": "pnpm --filter @workshop/phase3-threads threadify",
+    "phase3:check": "pnpm --filter @workshop/phase3-threads check",
     "phase4:widgets": "pnpm --filter @workshop/phase4-app widgetize",
+    "phase4:check": "pnpm --filter @workshop/phase4-app check",
     "phase4": "pnpm --filter @workshop/phase4-app dev",
-    "fixtures:snapshot": "pnpm --filter @workshop/phase1-seed snapshot"
+    "checkpoint": "sh scripts/checkpoint.sh",
+    "seed:pr": "pnpm --filter @workshop/seed-pr seed",
+    "fixtures:snapshot": "pnpm --filter @workshop/seed-pr snapshot"
   }
 }
