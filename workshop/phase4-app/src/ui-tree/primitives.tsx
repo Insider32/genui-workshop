@@ -104,5 +104,22 @@ export const PRIMITIVES = {
     );
   },
 
-  // TODO(phase-4 finale): add the `timeline` primitive here.
+  timeline: ({ node }) => (
+    <ol className="ui-timeline">
+      {node.steps.map((step, i) => (
+        <li key={i}>
+          <span className={`marker ${step.status}`} aria-label={step.status}>
+            {step.status === 'done' ? '✓' : step.status === 'blocked' ? '!' : i + 1}
+          </span>
+          <div>
+            <div className="step-title">
+              {step.title}
+              {step.owner && <span className="step-owner">{step.owner}</span>}
+            </div>
+            <p className="step-desc">{step.description}</p>
+          </div>
+        </li>
+      ))}
+    </ol>
+  ),
 } satisfies PrimitiveRenderers;
