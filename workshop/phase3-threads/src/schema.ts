@@ -10,7 +10,7 @@ import { z } from 'zod';
  */
 
 /** Phase 3, edit #1a: the severity ladder the model may use. */
-export const ThreadSeverity = z.string(); // TODO(phase-3, edit #1a): constrain to an enum
+export const ThreadSeverity = z.enum(['critical', 'high', 'medium', 'low']);
 export type ThreadSeverity = z.infer<typeof ThreadSeverity>;
 
 export const ThreadCategory = z.enum(['security', 'architecture', 'correctness', 'tests', 'style', 'ops']);
@@ -34,7 +34,7 @@ export type ThreadStatus = z.infer<typeof ThreadStatus>;
  *   custom     none of the above fits; a bespoke layout is warranted
  *   none       plain text is fine
  */
-export const UiHint = z.string(); // TODO(phase-3, edit #1b): constrain to the shapes documented above
+export const UiHint = z.enum(['diff', 'graph', 'choice', 'chart', 'checklist', 'file', 'custom', 'none']);
 export type UiHint = z.infer<typeof UiHint>;
 
 export const ThreadSchema = z.object({

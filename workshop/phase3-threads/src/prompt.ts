@@ -7,7 +7,17 @@
  */
 export const GROUPING_RULES = `
 Grouping rules:
-- (TODO, phase-3 edit #2: how should 44 comments become a handful of threads?)
+- One thread per *decision or fix*, not per comment and not per file. Aim for 8 to 12 threads.
+- Comments that argue about the same design question belong together even if they sit in different
+  files (for example where tokens are stored and how refresh tokens rotate are one decision).
+- Fold ALL style nits from the style reviewer into a single thread with ui_hint "checklist",
+  regardless of file.
+- Comments that only make sense together as a sequence of deployment steps belong in one thread
+  with ui_hint "custom".
+- A thread's severity is the highest severity among its comments. A thread's category is the
+  category of its most severe comment.
+- Every comment id in the report must appear in exactly one thread's source_comments.
+  Do not invent ids. Do not drop ids.
 `.trim();
 
 export const THREADIFY_SYSTEM_PROMPT = `
