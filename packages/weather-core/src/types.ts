@@ -38,3 +38,38 @@ export interface Forecast {
 }
 
 export type Units = 'metric' | 'imperial';
+
+/** A registered account. Passwords never leave the API. */
+export interface User {
+  id: string;
+  email: string;
+  createdAt: string;
+  preferences?: Record<string, any>;
+}
+
+/** Token pair returned by the auth endpoints. */
+export interface AuthTokens {
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+}
+
+/** A saved location that syncs across a user's devices. */
+export interface Favorite {
+  id: string;
+  userId: string;
+  name: string;
+  country: string;
+  latitude: number;
+  longitude: number;
+  timezone: string;
+  createdAt: string;
+}
+
+export type FavoriteInput = Omit<Favorite, 'id' | 'userId' | 'createdAt'>;
+
+/** Favorite enriched with a live reading for the favorites panel. */
+export interface FavoriteWithWeather extends Favorite {
+  temperatureC?: number;
+  weatherCode?: number;
+}

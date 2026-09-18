@@ -205,3 +205,125 @@ body {
   clip: rect(0 0 0 0);
   white-space: nowrap;
 }
+
+/* --- accounts & favorites --- */
+
+.app {
+  max-width: 1040px !important;
+}
+
+.app-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr);
+  gap: 1.5rem;
+  align-items: start;
+}
+
+@media (max-width: 720px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.current-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.save-button {
+  background: transparent;
+  border: 1px solid #334155;
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 1.25rem;
+  width: 2.5rem;
+  height: 2.5rem;
+  cursor: pointer;
+}
+
+.save-button.saved {
+  color: #38bdf8;
+  border-color: #38bdf8;
+}
+
+.favorites,
+.auth-form {
+  background: var(--panel);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+}
+
+.favorites h3,
+.auth-form h3 {
+  margin: 0 0 1rem;
+}
+
+.favorites-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.favorite {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.5rem 0.6rem;
+  background: var(--panel-2);
+  border-radius: 8px;
+}
+
+.favorite-name {
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0;
+}
+
+.favorite-remove {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 1.1rem;
+}
+
+.auth-form input {
+  padding: 0.6rem 0.8rem;
+  border-radius: 8px;
+  border: 1px solid #334155;
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.auth-form button[type='submit'] {
+  padding: 0.6rem;
+  border-radius: 8px;
+  border: 0;
+  background: var(--accent);
+  color: #0f172a;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.link {
+  background: transparent;
+  border: 0;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+}
