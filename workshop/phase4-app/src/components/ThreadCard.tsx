@@ -3,6 +3,7 @@ import type { Thread } from '@workshop/phase3-threads/schema';
 import type { ThreadStateApi } from '../state/useThreadState';
 import { Badge, SeverityBadge } from './Badge';
 import { CommentList } from './CommentList';
+import { ThreadWidget } from '../widgets/ThreadWidget';
 
 interface Props {
   thread: Thread;
@@ -57,6 +58,8 @@ export function ThreadCard({ thread, state, defaultOpen = false }: Props) {
               <strong>Decision:</strong> {current.decision}
             </p>
           )}
+
+          <ThreadWidget thread={thread} state={state} />
 
           <ul className="thread-actions">
             {thread.suggested_actions.map((a) => (
