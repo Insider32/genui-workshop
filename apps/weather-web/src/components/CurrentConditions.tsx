@@ -5,19 +5,32 @@ import { formatTemp, formatWind } from '../lib/format';
 interface Props {
   forecast: Forecast;
   units: Units;
+  saved?: boolean;
+  onSave?: () => void;
 }
 
-export function CurrentConditions({ forecast, units }: Props) {
+export function CurrentConditions({ forecast, units, saved, onSave }: Props) {
   const { current, location } = forecast;
   const { label, icon } = describeWeatherCode(current.weatherCode);
 
   return (
     <section className="current" aria-label="Current conditions">
-      <header>
+      <header className="current-header">
         <h2>
           {location.name}
           {location.country ? <span className="muted">, {location.country}</span> : null}
         </h2>
+        {onSave && (
+          <button
+            type="button"
+            className={saved ? 'save-button saved' : 'save-button'}
+            onClick={onSave}
+            aria-pressed={saved}
+            aria-label={saved ? 'Saved to favorites' : 'Save to favorites'}
+          >
+            {saved ? '★' : '☆'}
+          </button>
+        )}
       </header>
       <div className="current-main">
         <span className="current-icon" aria-hidden="true">
