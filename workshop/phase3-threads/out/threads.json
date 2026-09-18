@@ -1,0 +1,282 @@
+{
+  "threads": [
+    {
+      "id": "thr-001",
+      "title": "Passwords are hashed with unsalted SHA-256",
+      "category": "security",
+      "severity": "critical",
+      "status": "open",
+      "source_comments": [
+        "c-01"
+      ],
+      "files": [
+        "apps/weather-api/src/auth/password.ts"
+      ],
+      "summary": "The password store uses a single unsalted SHA-256 digest, which is fast, deterministic and reversible with a rainbow table for common passwords. Identical passwords produce identical hashes, and the string comparison in verifyPassword leaks timing. The reviewer supplied a drop-in scrypt implementation with per-user salts and a constant-time compare. This is the one blocking issue in the PR.",
+      "suggested_actions": [
+        "Replace hashPassword and verifyPassword with the scrypt version from the comment",
+        "Add a test that two users with the same password get different hashes",
+        "Re-register any test fixtures that stored the old hash format"
+      ],
+      "ui_hint": "diff"
+    },
+    {
+      "id": "thr-002",
+      "title": "Token storage and refresh strategy need one decision",
+      "category": "security",
+      "severity": "high",
+      "status": "open",
+      "source_comments": [
+        "c-02",
+        "c-07",
+        "c-08",
+        "c-18"
+      ],
+      "files": [
+        "apps/weather-web/src/auth/AuthContext.tsx",
+        "apps/weather-api/src/config.ts",
+        "apps/weather-web/src/auth/LoginForm.tsx",
+        "apps/weather-api/src/routes/auth.ts"
+      ],
+      "summary": "Four comments describe one design question. Tokens are persisted in localStorage where any script on the origin can read them, the access token lives for thirty days, refresh tokens are returned unchanged so they never rotate, and the login form logs the token pair to the console. The security reviewer prefers an httpOnly refresh cookie with a short in-memory access token, and the architecture reviewer favours refresh rotation over a sliding window. These should be settled together before any of them is patched.",
+      "suggested_actions": [
+        "Choose one of the storage and refresh approaches below",
+        "Shorten the access token TTL to fifteen minutes or less",
+        "Remove the console.log of the token pair in LoginForm"
+      ],
+      "ui_hint": "choice"
+    },
+    {
+      "id": "thr-003",
+      "title": "Favorites API lacks ownership check and input validation",
+      "category": "security",
+      "severity": "high",
+      "status": "open",
+      "source_comments": [
+        "c-03",
+        "c-11"
+      ],
+      "files": [
+        "apps/weather-api/src/routes/favorites.ts",
+        "apps/weather-api/src/store/favorites.ts"
+      ],
+      "summary": "DELETE /api/favorites/:id removes whatever id is passed without checking that it belongs to the signed-in user, so any account can delete any other account's favorites. POST /api/favorites stores the request body as typed with no bounds on coordinates, string lengths or extra properties. Both comments include exact replacement code.",
+      "suggested_actions": [
+        "Scope removeFavorite to (userId, id) and return 404 for foreign ids",
+        "Validate the create body with a strict schema before storing it",
+        "Add tests for cross-user delete and for out-of-range coordinates"
+      ],
+      "ui_hint": "diff"
+    },
+    {
+      "id": "thr-004",
+      "title": "JWT secret falls back to a public default and tokens are accepted from the URL",
+      "category": "security",
+      "severity": "high",
+      "status": "open",
+      "source_comments": [
+        "c-04",
+        "c-05"
+      ],
+      "files": [
+        "apps/weather-api/src/config.ts",
+        "apps/weather-api/src/auth/middleware.ts"
+      ],
+      "summary": "If JWT_SECRET is missing the API silently signs every token with a string that is committed to the repository, so anyone can mint valid tokens. Separately, the auth middleware accepts the access token from a ?token= query parameter, which places bearer credentials in access logs, proxy logs, browser history and Referer headers.",
+      "suggested_actions": [
+        "Throw at startup when JWT_SECRET is missing or shorter than 32 bytes",
+        "Remove the query-string token path from requireAuth",
+        "Gate any dev-only default on NODE_ENV and log a warning"
+      ],
+      "ui_hint": "diff"
+    },
+    {
+      "id": "thr-005",
+      "title": "Circular import between the user and favorites stores",
+      "category": "architecture",
+      "severity": "high",
+      "status": "open",
+      "source_comments": [
+        "c-13",
+        "c-14",
+        "c-15"
+      ],
+      "files": [
+        "apps/weather-api/src/store/users.ts",
+        "apps/weather-api/src/store/favorites.ts",
+        "apps/weather-api/src/routes/favorites.ts",
+        "apps/weather-api/src/app.ts"
+      ],
+      "summary": "store/users.ts imports store/favorites.ts for cascade deletes while store/favorites.ts imports store/users.ts to check the user exists. It works only because both uses are inside function bodies. The favorites route also calls the weather provider directly and sequentially, bypassing the TtlCache the forecast route already uses, so the panel poll fans out to the upstream API once per favorite. The reviewer proposes a service layer that removes the back edge and owns the enrichment.",
+      "suggested_actions": [
+        "Move the cascade delete out of the stores into an account service",
+        "Route favorites enrichment through the cached forecast lookup",
+        "Introduce services/favorites.ts so routes depend on services, and services on stores"
+      ],
+      "ui_hint": "graph"
+    },
+    {
+      "id": "thr-006",
+      "title": "API and web must ship in a fixed order",
+      "category": "ops",
+      "severity": "high",
+      "status": "open",
+      "source_comments": [
+        "c-25",
+        "c-26",
+        "c-27",
+        "c-10"
+      ],
+      "files": [
+        "apps/weather-api/src/app.ts",
+        "apps/weather-api/src/config.ts",
+        "apps/weather-web/src/App.tsx"
+      ],
+      "summary": "The new web build sends an Authorization header on every request, which turns simple GETs into preflighted ones. The API currently in production does not allow that header, so if the web app deploys first every forecast request fails CORS and the app goes blank for signed-in users. JWT_SECRET must also be provisioned in every environment before the API ships, and the CORS wildcard-with-credentials change needs reverting. The reviewer recommends feature-flagging the accounts UI so the web bundle can ship dark.",
+      "suggested_actions": [
+        "Provision JWT_SECRET in dev, staging and prod before deploying the API",
+        "Deploy the API first, then the web app with the accounts UI flagged off",
+        "Restore the explicit CORS origin list",
+        "Document the sequence in the PR description"
+      ],
+      "ui_hint": "custom"
+    },
+    {
+      "id": "thr-007",
+      "title": "API client can loop forever on 401 and crashes on base64url tokens",
+      "category": "correctness",
+      "severity": "high",
+      "status": "open",
+      "source_comments": [
+        "c-19",
+        "c-17",
+        "c-20"
+      ],
+      "files": [
+        "apps/weather-web/src/api/client.ts",
+        "apps/weather-web/src/auth/AuthContext.tsx"
+      ],
+      "summary": "request() refreshes and retries on every 401 with no retry guard, so a user whose refresh succeeds but whose access is still rejected loops indefinitely. Concurrent 401s each trigger their own refresh and overwrite each other's tokens, which will sign users out once rotation lands. decodeUser uses atob on base64url payloads without a try/catch and runs inside useMemo, so a stale token can crash the whole tree on mount.",
+      "suggested_actions": [
+        "Pass a retried flag so the refresh-and-retry happens at most once",
+        "Make refresh single-flight by sharing one in-progress promise",
+        "Decode JWT payloads as base64url inside a try/catch that clears bad tokens"
+      ],
+      "ui_hint": "diff"
+    },
+    {
+      "id": "thr-008",
+      "title": "Login route needs hardening against enumeration and brute force",
+      "category": "security",
+      "severity": "medium",
+      "status": "open",
+      "source_comments": [
+        "c-06",
+        "c-09",
+        "c-12"
+      ],
+      "files": [
+        "apps/weather-api/src/routes/auth.ts"
+      ],
+      "summary": "Three remarks land on the same forty lines. Login returns different messages for an unknown email and a wrong password, revealing which addresses are registered. There is no rate limiting or lockout, which combined with the fast hash makes credential stuffing cheap. Emails are neither trimmed nor lower-cased, so one person can create several accounts. Best read in place in the file.",
+      "suggested_actions": [
+        "Return one generic 401 message for both login failure branches",
+        "Add a per-IP and per-email limiter returning 429 with Retry-After",
+        "Normalise emails with trim().toLowerCase() on register and login"
+      ],
+      "ui_hint": "file"
+    },
+    {
+      "id": "thr-009",
+      "title": "Favorites panel polls every five seconds",
+      "category": "architecture",
+      "severity": "medium",
+      "status": "open",
+      "source_comments": [
+        "c-16"
+      ],
+      "files": [
+        "apps/weather-web/src/favorites/useFavorites.ts"
+      ],
+      "summary": "useFavorites refetches GET /api/favorites every 5 seconds for as long as the user is signed in, including in hidden tabs. Because the route fans out to the weather provider per favorite, this is the most expensive loop in the application. The reviewer lists three alternatives and considers refetch-on-focus sufficient for a list that changes a few times a day.",
+      "suggested_actions": [
+        "Pick a sync strategy from the options below",
+        "Pause any remaining polling while document.hidden is true"
+      ],
+      "ui_hint": "choice"
+    },
+    {
+      "id": "thr-010",
+      "title": "New auth and favorites code is largely untested",
+      "category": "tests",
+      "severity": "medium",
+      "status": "open",
+      "source_comments": [
+        "c-21",
+        "c-22",
+        "c-23",
+        "c-24"
+      ],
+      "files": [
+        "apps/weather-api/src/__tests__/auth.test.ts",
+        "apps/weather-api/src/routes/favorites.ts",
+        "apps/weather-api/src/auth/middleware.ts",
+        "apps/weather-web/src/auth/AuthContext.tsx"
+      ],
+      "summary": "The only new test is the register-then-login happy path. Line coverage is 38% for the auth routes, 0% for the favorites routes and store, 0% for the middleware and 45% for the JWT module, and nothing on the web side is tested. Overall PR coverage moves from 81% to 64%. Several untested branches are the security-relevant ones flagged elsewhere in this review.",
+      "suggested_actions": [
+        "Add the seven auth route cases listed by the coverage reviewer",
+        "Add favorites tests including cross-user access using the existing fake client",
+        "Cover expired, malformed and wrong-type tokens in the middleware",
+        "Plan a web test setup for AuthContext and useFavorites"
+      ],
+      "ui_hint": "chart"
+    },
+    {
+      "id": "thr-011",
+      "title": "17 style nits across the PR",
+      "category": "style",
+      "severity": "low",
+      "status": "open",
+      "source_comments": [
+        "c-28",
+        "c-29",
+        "c-30",
+        "c-31",
+        "c-32",
+        "c-33",
+        "c-34",
+        "c-35",
+        "c-36",
+        "c-37",
+        "c-38",
+        "c-39",
+        "c-40",
+        "c-41",
+        "c-42",
+        "c-43",
+        "c-44"
+      ],
+      "files": [
+        "packages/weather-core/src/types.ts",
+        "apps/weather-api/src/config.ts",
+        "apps/weather-api/src/auth/jwt.ts",
+        "apps/weather-api/src/auth/middleware.ts",
+        "apps/weather-api/src/store/users.ts",
+        "apps/weather-api/src/routes/auth.ts",
+        "apps/weather-api/src/routes/favorites.ts",
+        "apps/weather-api/src/app.ts",
+        "apps/weather-web/src/auth/AuthContext.tsx",
+        "apps/weather-web/src/auth/LoginForm.tsx",
+        "apps/weather-web/src/styles.css",
+        "apps/weather-web/src/favorites/FavoritesPanel.tsx"
+      ],
+      "summary": "The style reviewer left seventeen independent, low-severity comments: an any in the shared types, magic numbers, an unused import, loose equality, inconsistent naming, two leftover console.logs, an inconsistent response envelope, a sequential await loop, a TODO that should not merge, a duplicated string literal, inline styles, inputs without labels, a hardcoded colour, an index used as a React key, a nested ternary, and an !important. None changes behaviour; most are mechanical.",
+      "suggested_actions": [
+        "Work through the checklist below and tick each item as it lands",
+        "Run the formatter and linter with --fix first, then handle the rest by hand"
+      ],
+      "ui_hint": "checklist"
+    }
+  ]
+}
