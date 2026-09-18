@@ -24,5 +24,5 @@ export const WIDGET_REGISTRY: { [K in WidgetKind]?: WidgetComponent<K> } = {
   chart: ChartWidget,
   file: FileWidget,
   custom: CustomWidget,
-  // checklist: ChecklistWidget,   // TODO(phase-4, edit #1): register it
+  checklist: ChecklistWidget,
 };
